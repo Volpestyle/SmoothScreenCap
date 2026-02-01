@@ -23,9 +23,11 @@
           "enum": ["screen", "mic", "systemAudio", "webcam", "events"]
         },
         "codec": {"type": "string"},
+        "format": {"type": "string"},
         "duration": {"type": "number"},
         "width": {"type": "integer"},
         "height": {"type": "integer"},
+        "frameRate": {"type": "number"},
         "sampleRate": {"type": "integer"},
         "channels": {"type": "integer"},
         "timebase": {"type": "number"}

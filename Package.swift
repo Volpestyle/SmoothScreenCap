@@ -11,6 +11,7 @@ let package = Package(
     .library(name: "TimeMapping", targets: ["TimeMapping"]),
     .library(name: "AutoZoom", targets: ["AutoZoom"]),
     .library(name: "EventLog", targets: ["EventLog"]),
+    .library(name: "ProjectPackaging", targets: ["ProjectPackaging"]),
     .library(name: "Recording", targets: ["Recording"]),
     .library(name: "Rendering", targets: ["Rendering"]),
     .library(name: "ExportEngine", targets: ["ExportEngine"]),
@@ -24,7 +25,11 @@ let package = Package(
         "ProjectModel",
         "TimeMapping",
         "AutoZoom",
-        "EventLog"
+        "EventLog",
+        "ProjectPackaging",
+        "ExportEngine",
+        "Rendering",
+        "Recording"
       ],
       path: "App"
     ),
@@ -47,15 +52,24 @@ let package = Package(
       path: "Core/EventLog"
     ),
     .target(
+      name: "ProjectPackaging",
+      dependencies: ["ProjectModel", "AutoZoom", "EventLog"],
+      path: "Core/ProjectPackaging"
+    ),
+    .target(
       name: "Recording",
+      dependencies: ["EventLog"],
       path: "Recording"
     ),
     .target(
       name: "Rendering",
-      path: "Rendering"
+      dependencies: ["ProjectModel"],
+      path: "Rendering",
+      resources: [.process("Shaders")]
     ),
     .target(
       name: "ExportEngine",
+      dependencies: ["ProjectModel", "TimeMapping", "Rendering"],
       path: "Export"
     ),
     .executableTarget(
@@ -64,7 +78,10 @@ let package = Package(
         "ProjectModel",
         "TimeMapping",
         "AutoZoom",
-        "EventLog"
+        "EventLog",
+        "ProjectPackaging",
+        "ExportEngine",
+        "Rendering"
       ],
       path: "Tools/ssc-cli"
     ),
@@ -87,6 +104,21 @@ let package = Package(
       name: "EventLogTests",
       dependencies: ["EventLog"],
       path: "Tests/EventLogTests"
+    ),
+    .testTarget(
+      name: "ExportEngineTests",
+      dependencies: ["ExportEngine", "ProjectModel", "Rendering", "TimeMapping"],
+      path: "Tests/ExportEngineTests"
+    ),
+    .testTarget(
+      name: "ProjectPackagingTests",
+      dependencies: ["ProjectPackaging", "ProjectModel", "EventLog", "AutoZoom"],
+      path: "Tests/ProjectPackagingTests"
+    ),
+    .testTarget(
+      name: "RenderingTests",
+      dependencies: ["Rendering"],
+      path: "Tests/RenderingTests"
     )
   ]
 )

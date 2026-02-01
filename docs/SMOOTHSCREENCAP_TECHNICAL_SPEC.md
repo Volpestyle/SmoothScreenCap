@@ -61,7 +61,7 @@ Event logging
 - High-resolution event stream with timebase aligned to recording.
 - Mouse events: position (global and captured), button down/up, scroll.
 - Keyboard events: keyDown only, without key values by default.
-- Prefer CGEventTapCreate; fallback to NSEvent.addGlobalMonitorForEvents.
+- Use CGEventTapCreate (no fallback).
 - Store as JSON Lines in events.jsonl.
 
 Project model
