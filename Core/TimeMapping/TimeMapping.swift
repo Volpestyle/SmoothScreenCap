@@ -1,4 +1,5 @@
 import Foundation
+import ProjectModel
 
 public struct TimeMapping: Equatable {
   public struct Segment: Equatable {
@@ -72,7 +73,7 @@ public struct TimeMapping: Equatable {
         return segment.outputStart + (sourceTime - segment.sourceStart) / segment.rate
       }
     }
-    if sourceTime == sourceDuration, let last = segments.last {
+    if sourceTime == sourceDuration, let last = segments.last, last.sourceEnd == sourceDuration {
       return last.outputEnd
     }
     return nil

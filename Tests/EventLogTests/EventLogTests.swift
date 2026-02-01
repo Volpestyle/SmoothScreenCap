@@ -27,7 +27,7 @@ final class EventLogTests: XCTestCase {
       ),
       EventLogEntry(
         time: 0.4,
-        key: .init(action: .down, keyCode: nil, isRepeat: false, modifiers: ["cmd"])
+        key: .init(action: .down, isRepeat: false, modifiers: ["cmd"])
       )
     ]
 

@@ -11,9 +11,9 @@ final class TimeMappingTests: XCTestCase {
     )
 
     XCTAssertEqual(mapping.outputDuration, 10, accuracy: 0.0001)
-    XCTAssertEqual(mapping.outputTime(for: 0), 0, accuracy: 0.0001)
-    XCTAssertEqual(mapping.outputTime(for: 5), 5, accuracy: 0.0001)
-    XCTAssertEqual(mapping.sourceTime(for: 5), 5, accuracy: 0.0001)
+    XCTAssertEqual(mapping.outputTime(for: 0) ?? -1, 0, accuracy: 0.0001)
+    XCTAssertEqual(mapping.outputTime(for: 5) ?? -1, 5, accuracy: 0.0001)
+    XCTAssertEqual(mapping.sourceTime(for: 5) ?? -1, 5, accuracy: 0.0001)
   }
 
   func testCutsRemoveTime() {
@@ -24,9 +24,9 @@ final class TimeMappingTests: XCTestCase {
     )
 
     XCTAssertNil(mapping.outputTime(for: 3))
-    XCTAssertEqual(mapping.outputTime(for: 1), 1, accuracy: 0.0001)
-    XCTAssertEqual(mapping.outputTime(for: 5), 3, accuracy: 0.0001)
-    XCTAssertEqual(mapping.sourceTime(for: 3), 5, accuracy: 0.0001)
+    XCTAssertEqual(mapping.outputTime(for: 1) ?? -1, 1, accuracy: 0.0001)
+    XCTAssertEqual(mapping.outputTime(for: 5) ?? -1, 3, accuracy: 0.0001)
+    XCTAssertEqual(mapping.sourceTime(for: 3) ?? -1, 5, accuracy: 0.0001)
   }
 
   func testSpeedSegmentsScaleTime() {
@@ -37,10 +37,10 @@ final class TimeMappingTests: XCTestCase {
     )
 
     XCTAssertEqual(mapping.outputDuration, 8, accuracy: 0.0001)
-    XCTAssertEqual(mapping.outputTime(for: 1), 1, accuracy: 0.0001)
-    XCTAssertEqual(mapping.outputTime(for: 3), 2.5, accuracy: 0.0001)
-    XCTAssertEqual(mapping.outputTime(for: 8), 6, accuracy: 0.0001)
-    XCTAssertEqual(mapping.sourceTime(for: 2.5), 3, accuracy: 0.0001)
+    XCTAssertEqual(mapping.outputTime(for: 1) ?? -1, 1, accuracy: 0.0001)
+    XCTAssertEqual(mapping.outputTime(for: 3) ?? -1, 2.5, accuracy: 0.0001)
+    XCTAssertEqual(mapping.outputTime(for: 8) ?? -1, 6, accuracy: 0.0001)
+    XCTAssertEqual(mapping.sourceTime(for: 2.5) ?? -1, 3, accuracy: 0.0001)
   }
 
   func testInvertibilityWithinSegments() {

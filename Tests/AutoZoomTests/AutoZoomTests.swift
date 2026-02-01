@@ -36,8 +36,8 @@ final class AutoZoomTests: XCTestCase {
     )
 
     XCTAssertEqual(segments.count, 1)
-    XCTAssertEqual(segments[0].targetPoint?.x, 300, accuracy: 0.0001)
-    XCTAssertEqual(segments[0].targetPoint?.y, 250, accuracy: 0.0001)
+    XCTAssertEqual(segments[0].targetPoint?.x ?? -1, 300, accuracy: 0.0001)
+    XCTAssertEqual(segments[0].targetPoint?.y ?? -1, 250, accuracy: 0.0001)
   }
 
   func testTargetRectClampsWithinBounds() {

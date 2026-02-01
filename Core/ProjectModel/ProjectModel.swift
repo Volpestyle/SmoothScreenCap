@@ -72,9 +72,11 @@ public struct AssetRef: Codable, Equatable {
   public var path: String
   public var type: AssetType
   public var codec: String?
+  public var format: String?
   public var duration: Double?
   public var width: Int?
   public var height: Int?
+  public var frameRate: Double?
   public var sampleRate: Int?
   public var channels: Int?
   public var timebase: Double?
@@ -83,9 +85,11 @@ public struct AssetRef: Codable, Equatable {
     path: String,
     type: AssetType,
     codec: String? = nil,
+    format: String? = nil,
     duration: Double? = nil,
     width: Int? = nil,
     height: Int? = nil,
+    frameRate: Double? = nil,
     sampleRate: Int? = nil,
     channels: Int? = nil,
     timebase: Double? = nil
@@ -93,9 +97,11 @@ public struct AssetRef: Codable, Equatable {
     self.path = path
     self.type = type
     self.codec = codec
+    self.format = format
     self.duration = duration
     self.width = width
     self.height = height
+    self.frameRate = frameRate
     self.sampleRate = sampleRate
     self.channels = channels
     self.timebase = timebase
@@ -109,6 +115,7 @@ public struct Edit: Codable, Equatable {
   public var cursorOverrides: [CursorOverride]
   public var background: Background
   public var motion: Motion
+  public var audioSettings: AudioSettings?
   public var exportPresets: [ExportPreset]
 
   public init(
@@ -118,6 +125,7 @@ public struct Edit: Codable, Equatable {
     cursorOverrides: [CursorOverride],
     background: Background,
     motion: Motion,
+    audioSettings: AudioSettings? = nil,
     exportPresets: [ExportPreset]
   ) {
     self.cuts = cuts
@@ -126,6 +134,7 @@ public struct Edit: Codable, Equatable {
     self.cursorOverrides = cursorOverrides
     self.background = background
     self.motion = motion
+    self.audioSettings = audioSettings
     self.exportPresets = exportPresets
   }
 }
@@ -337,6 +346,22 @@ public struct Motion: Codable, Equatable {
     self.cursorStyle = cursorStyle
     self.zoomStyle = zoomStyle
     self.spring = spring
+  }
+}
+
+public struct AudioSettings: Codable, Equatable {
+  public var microphoneVolume: Double
+  public var systemAudioVolume: Double
+  public var normalizeAudio: Bool
+
+  public init(
+    microphoneVolume: Double = 1.0,
+    systemAudioVolume: Double = 0.8,
+    normalizeAudio: Bool = true
+  ) {
+    self.microphoneVolume = microphoneVolume
+    self.systemAudioVolume = systemAudioVolume
+    self.normalizeAudio = normalizeAudio
   }
 }
 

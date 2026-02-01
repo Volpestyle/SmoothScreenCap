@@ -64,18 +64,15 @@ public struct EventLogEntry: Codable, Equatable {
     }
 
     public var action: Action
-    public var keyCode: Int?
     public var isRepeat: Bool?
     public var modifiers: [String]?
 
     public init(
       action: Action = .down,
-      keyCode: Int? = nil,
       isRepeat: Bool? = nil,
       modifiers: [String]? = nil
     ) {
       self.action = action
-      self.keyCode = keyCode
       self.isRepeat = isRepeat
       self.modifiers = modifiers
     }

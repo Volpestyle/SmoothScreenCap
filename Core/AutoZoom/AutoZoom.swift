@@ -173,7 +173,6 @@ public struct AutoZoom {
     let safeZoom = max(zoom, 1.0)
     let maxWidth = max(sourceSize.width - padding * 2.0, 1.0)
     let maxHeight = max(sourceSize.height - padding * 2.0, 1.0)
-    let sourceAspect = maxWidth / maxHeight
     let targetAspect = max(outputAspectRatio, 0.1)
 
     var cropWidth = maxWidth / safeZoom
@@ -187,16 +186,14 @@ public struct AutoZoom {
     let minY = padding
     let maxX = sourceSize.width - padding - cropWidth
     let maxY = sourceSize.height - padding - cropHeight
+    let clampedMaxX = max(minX, maxX)
+    let clampedMaxY = max(minY, maxY)
 
     var originX = focus.x - cropWidth * 0.5
     var originY = focus.y - cropHeight * 0.5
 
-    if sourceAspect >= targetAspect {
-      originX = min(max(originX, minX), maxX)
-    } else {
-      originX = min(max(originX, minX), maxX)
-    }
-    originY = min(max(originY, minY), maxY)
+    originX = min(max(originX, minX), clampedMaxX)
+    originY = min(max(originY, minY), clampedMaxY)
 
     return Rect(
       origin: Point(x: originX, y: originY),
