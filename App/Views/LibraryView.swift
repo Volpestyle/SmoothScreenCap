@@ -1,15 +1,21 @@
 import SwiftUI
+import ProjectModel
 
 struct LibraryView: View {
     @EnvironmentObject var appState: AppState
     @State private var searchText = ""
-    @State private var hoveredProject: Project?
+    @State private var hoveredProject: URL?
 
-    var filteredProjects: [Project] {
-        if searchText.isEmpty {
-            return appState.recentProjects
+    var filteredProjects: [(url: URL, metadata: ProjectMetadata)] {
+        let projects = appState.recentProjectURLs.compactMap { url -> (URL, ProjectMetadata)? in
+            guard let metadata = appState.projectMetadata[url] else { return nil }
+            return (url, metadata)
         }
-        return appState.recentProjects.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
+
+        if searchText.isEmpty {
+            return projects
+        }
+        return projects.filter { $0.1.name.localizedCaseInsensitiveContains(searchText) }
     }
 
     var body: some View {
@@ -64,16 +70,25 @@ struct LibraryView: View {
                         EmptyLibraryState()
                     } else {
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 280, maximum: 340), spacing: 20)], spacing: 20) {
-                            ForEach(filteredProjects) { project in
+                            ForEach(filteredProjects, id: \.url) { item in
                                 ProjectCard(
-                                    project: project,
-                                    isHovered: hoveredProject == project
+                                    metadata: item.metadata,
+                                    isHovered: hoveredProject == item.url
                                 )
                                 .onTapGesture {
-                                    appState.openProject(project)
+                                    appState.openProject(at: item.url)
                                 }
                                 .onHover { isHovered in
-                                    hoveredProject = isHovered ? project : nil
+                                    hoveredProject = isHovered ? item.url : nil
+                                }
+                                .contextMenu {
+                                    Button("Reveal in Finder") {
+                                        ProjectManager().revealInFinder(item.url)
+                                    }
+                                    Divider()
+                                    Button("Delete", role: .destructive) {
+                                        deleteProject(at: item.url)
+                                    }
                                 }
                             }
                         }
@@ -88,9 +103,9 @@ struct LibraryView: View {
                 SidebarSectionHeader(title: "QUICK STATS")
 
                 VStack(spacing: 16) {
-                    StatRow(label: "TOTAL PROJECTS", value: "\(appState.recentProjects.count)")
+                    StatRow(label: "TOTAL PROJECTS", value: "\(appState.recentProjectURLs.count)")
                     StatRow(label: "TOTAL DURATION", value: formatTotalDuration())
-                    StatRow(label: "DISK USAGE", value: "2.4 GB")
+                    StatRow(label: "STORAGE", value: projectsDirectory)
                 }
                 .padding(16)
 
@@ -108,6 +123,22 @@ struct LibraryView: View {
                 .padding(16)
 
                 Spacer()
+
+                // Open projects folder
+                Button {
+                    NSWorkspace.shared.open(ProjectManager().projectsDirectory)
+                } label: {
+                    HStack {
+                        Image(systemName: "folder")
+                        Text("Open Projects Folder")
+                            .font(.system(size: 12))
+                    }
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                }
+                .buttonStyle(.plain)
+                .padding(16)
             }
             .frame(width: 260)
             .background(Color(white: 0.06))
@@ -115,15 +146,30 @@ struct LibraryView: View {
         .background(Color(white: 0.04))
     }
 
+    private var projectsDirectory: String {
+        let path = ProjectManager().projectsDirectory.path
+        return path.replacingOccurrences(of: NSHomeDirectory(), with: "~")
+    }
+
     private func formatTotalDuration() -> String {
-        let total = appState.recentProjects.reduce(0) { $0 + $1.duration }
+        let total = appState.projectMetadata.values.reduce(0) { $0 + $1.duration }
         let minutes = Int(total) / 60
         return "\(minutes) min"
+    }
+
+    private func deleteProject(at url: URL) {
+        do {
+            try ProjectManager().deleteProject(at: url)
+            appState.recentProjectURLs.removeAll { $0 == url }
+            appState.projectMetadata.removeValue(forKey: url)
+        } catch {
+            print("Failed to delete project: \(error)")
+        }
     }
 }
 
 struct ProjectCard: View {
-    let project: Project
+    let metadata: ProjectMetadata
     let isHovered: Bool
 
     var body: some View {
@@ -133,7 +179,7 @@ struct ProjectCard: View {
                 Rectangle()
                     .fill(
                         LinearGradient(
-                            colors: [project.thumbnailColor.opacity(0.3), project.thumbnailColor.opacity(0.1)],
+                            colors: [metadata.thumbnailColor.opacity(0.3), metadata.thumbnailColor.opacity(0.1)],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         )
@@ -145,7 +191,7 @@ struct ProjectCard: View {
             }
             .frame(height: 160)
             .overlay(alignment: .topTrailing) {
-                Text(formatDuration(project.duration))
+                Text(formatDuration(metadata.duration))
                     .font(.system(size: 10, weight: .medium, design: .monospaced))
                     .foregroundStyle(.white)
                     .padding(.horizontal, 8)
@@ -157,12 +203,12 @@ struct ProjectCard: View {
 
             // Info
             VStack(alignment: .leading, spacing: 4) {
-                Text(project.name)
+                Text(metadata.name)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.white)
                     .lineLimit(1)
 
-                Text(project.createdAt.formatted(date: .abbreviated, time: .shortened))
+                Text(metadata.createdAt.formatted(date: .abbreviated, time: .shortened))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
