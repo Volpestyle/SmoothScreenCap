@@ -1,0 +1,201 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SmoothScreenCap Project",
+  "type": "object",
+  "required": ["id", "createdAt", "version", "assets", "edit"],
+  "properties": {
+    "id": {"type": "string", "format": "uuid"},
+    "createdAt": {"type": "string", "format": "date-time"},
+    "version": {"type": "string"},
+    "appVersion": {"type": "string"},
+    "assets": {"$ref": "#/definitions/assets"},
+    "edit": {"$ref": "#/definitions/edit"}
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "assetRef": {
+      "type": "object",
+      "required": ["path", "type"],
+      "properties": {
+        "path": {"type": "string"},
+        "type": {
+          "type": "string",
+          "enum": ["screen", "mic", "systemAudio", "webcam", "events"]
+        },
+        "codec": {"type": "string"},
+        "duration": {"type": "number"},
+        "width": {"type": "integer"},
+        "height": {"type": "integer"},
+        "sampleRate": {"type": "integer"},
+        "channels": {"type": "integer"},
+        "timebase": {"type": "number"}
+      },
+      "additionalProperties": false
+    },
+    "assets": {
+      "type": "object",
+      "required": ["screen", "events"],
+      "properties": {
+        "screen": {"$ref": "#/definitions/assetRef"},
+        "mic": {"$ref": "#/definitions/assetRef"},
+        "systemAudio": {"$ref": "#/definitions/assetRef"},
+        "webcam": {"$ref": "#/definitions/assetRef"},
+        "events": {"$ref": "#/definitions/assetRef"}
+      },
+      "additionalProperties": false
+    },
+    "timeRange": {
+      "type": "object",
+      "required": ["start", "end"],
+      "properties": {
+        "start": {"type": "number", "minimum": 0},
+        "end": {"type": "number", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "cut": {
+      "allOf": [
+        {"$ref": "#/definitions/timeRange"}
+      ]
+    },
+    "speedSegment": {
+      "allOf": [
+        {"$ref": "#/definitions/timeRange"},
+        {
+          "type": "object",
+          "required": ["rate"],
+          "properties": {
+            "rate": {"type": "number", "minimum": 0.1, "maximum": 8}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "zoomSegment": {
+      "allOf": [
+        {"$ref": "#/definitions/timeRange"},
+        {
+          "type": "object",
+          "required": ["mode"],
+          "properties": {
+            "mode": {"type": "string", "enum": ["auto", "manual"]},
+            "scale": {"type": "number", "minimum": 1},
+            "targetPoint": {
+              "type": "object",
+              "required": ["x", "y"],
+              "properties": {
+                "x": {"type": "number"},
+                "y": {"type": "number"}
+              },
+              "additionalProperties": false
+            },
+            "targetRect": {
+              "type": "object",
+              "required": ["x", "y", "width", "height"],
+              "properties": {
+                "x": {"type": "number"},
+                "y": {"type": "number"},
+                "width": {"type": "number"},
+                "height": {"type": "number"}
+              },
+              "additionalProperties": false
+            },
+            "easing": {"type": "string"}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "cursorOverride": {
+      "allOf": [
+        {"$ref": "#/definitions/timeRange"},
+        {
+          "type": "object",
+          "properties": {
+            "hideCursor": {"type": "boolean"},
+            "disableSmoothing": {"type": "boolean"},
+            "cursorScale": {"type": "number", "minimum": 0.1}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "background": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {"type": "string", "enum": ["color", "gradient", "image"]},
+        "color": {"type": "string"},
+        "gradient": {
+          "type": "object",
+          "properties": {
+            "startColor": {"type": "string"},
+            "endColor": {"type": "string"},
+            "angle": {"type": "number"}
+          },
+          "additionalProperties": false
+        },
+        "imagePath": {"type": "string"},
+        "padding": {"type": "number", "minimum": 0},
+        "cornerRadius": {"type": "number", "minimum": 0},
+        "shadow": {
+          "type": "object",
+          "properties": {
+            "radius": {"type": "number", "minimum": 0},
+            "x": {"type": "number"},
+            "y": {"type": "number"},
+            "color": {"type": "string"},
+            "opacity": {"type": "number", "minimum": 0, "maximum": 1}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "motion": {
+      "type": "object",
+      "properties": {
+        "cursorStyle": {"type": "string", "enum": ["slow", "mellow", "quick", "rapid"]},
+        "zoomStyle": {"type": "string", "enum": ["slow", "mellow", "quick", "rapid"]},
+        "spring": {
+          "type": "object",
+          "properties": {
+            "tension": {"type": "number", "minimum": 0},
+            "friction": {"type": "number", "minimum": 0},
+            "mass": {"type": "number", "minimum": 0}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "exportPreset": {
+      "type": "object",
+      "required": ["name", "width", "height", "fps"],
+      "properties": {
+        "name": {"type": "string"},
+        "width": {"type": "integer", "minimum": 1},
+        "height": {"type": "integer", "minimum": 1},
+        "fps": {"type": "number", "minimum": 1},
+        "codec": {"type": "string", "enum": ["h264", "hevc"]},
+        "bitrate": {"type": "integer", "minimum": 1},
+        "quality": {"type": "number", "minimum": 0, "maximum": 1}
+      },
+      "additionalProperties": false
+    },
+    "edit": {
+      "type": "object",
+      "required": ["cuts", "speedSegments", "zoomSegments", "cursorOverrides", "background", "motion", "exportPresets"],
+      "properties": {
+        "cuts": {"type": "array", "items": {"$ref": "#/definitions/cut"}},
+        "speedSegments": {"type": "array", "items": {"$ref": "#/definitions/speedSegment"}},
+        "zoomSegments": {"type": "array", "items": {"$ref": "#/definitions/zoomSegment"}},
+        "cursorOverrides": {"type": "array", "items": {"$ref": "#/definitions/cursorOverride"}},
+        "background": {"$ref": "#/definitions/background"},
+        "motion": {"$ref": "#/definitions/motion"},
+        "exportPresets": {"type": "array", "items": {"$ref": "#/definitions/exportPreset"}}
+      },
+      "additionalProperties": false
+    }
+  }
+}
