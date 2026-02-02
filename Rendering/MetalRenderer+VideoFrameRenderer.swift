@@ -18,11 +18,13 @@ extension MetalRenderer: VideoFrameRenderer {
       sourceRect: sourceRect
     )
     let cursor = cursorProvider?(time, context)
+    let clickHighlight = clickHighlightProvider?(time, context)
     let frame = RenderFrame(
       outputSize: outputSize,
       background: renderConfiguration.background,
       screen: screenLayer,
-      cursor: cursor
+      cursor: cursor,
+      clickHighlight: clickHighlight
     )
 
     // Convert destination CVPixelBuffer to MTLTexture and render

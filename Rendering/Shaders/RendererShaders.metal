@@ -1,6 +1,9 @@
 #include <metal_stdlib>
 using namespace metal;
 
+// NOTE: Keep shader math deterministic for export reproducibility.
+// Avoid introducing non-deterministic or fast-math-only paths without review.
+
 struct VertexIn {
   float2 position [[attribute(0)]];
   float2 uv [[attribute(1)]];
@@ -92,4 +95,56 @@ fragment float4 fragmentSolidRounded(
   float4 color = colorUniforms.color;
   color.rgb *= color.a;
   return float4(color.rgb * mask, color.a * mask);
+}
+
+// Click ripple effect uniforms
+struct ClickRippleUniforms {
+  float2 size;
+  float progress;     // 0-1 animation progress
+  float4 color;       // ripple color with alpha
+  float maxRadius;    // maximum radius of ripple
+  float padding;
+};
+
+// Click ripple effect - expanding ring that fades out
+fragment float4 fragmentClickRipple(
+  VertexOut in [[stage_in]],
+  constant ClickRippleUniforms &uniforms [[buffer(0)]]
+) {
+  float2 center = float2(0.5, 0.5);
+  float2 uv = in.uv;
+
+  // Calculate distance from center in normalized coordinates
+  float2 diff = uv - center;
+  // Account for aspect ratio
+  float aspectRatio = uniforms.size.x / uniforms.size.y;
+  diff.x *= aspectRatio;
+  float dist = length(diff) * 2.0; // Scale so edge is at 1.0
+
+  // Calculate ripple ring position based on progress
+  // Ring expands from 0 to 1 as progress goes from 0 to 1
+  float ringPosition = uniforms.progress;
+  float ringWidth = 0.15 * (1.0 - uniforms.progress * 0.5); // Ring gets thinner as it expands
+
+  // Distance from the ring
+  float ringDist = abs(dist - ringPosition);
+
+  // Soft edge for the ring
+  float ringMask = 1.0 - smoothstep(0.0, ringWidth, ringDist);
+
+  // Fade out as progress increases (using easing)
+  float fadeOut = 1.0 - uniforms.progress * uniforms.progress;
+
+  // Also add a subtle filled circle that fades quickly
+  float fillMask = 1.0 - smoothstep(0.0, ringPosition + 0.1, dist);
+  fillMask *= (1.0 - uniforms.progress) * 0.3; // Quick fade of fill
+
+  // Combine ring and fill
+  float alpha = (ringMask + fillMask) * fadeOut * uniforms.color.a;
+
+  float4 color = uniforms.color;
+  color.rgb *= alpha;
+  color.a = alpha;
+
+  return color;
 }

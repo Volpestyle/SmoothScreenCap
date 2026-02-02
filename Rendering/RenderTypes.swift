@@ -219,22 +219,47 @@ public struct CursorLayer {
   }
 }
 
+public struct ClickHighlight {
+  public var position: CGPoint
+  public var progress: Float  // 0-1, where 0 is start of animation and 1 is complete
+  public var color: RenderColor
+  public var maxRadius: CGFloat
+  public var enabled: Bool
+
+  public init(
+    position: CGPoint,
+    progress: Float,
+    color: RenderColor = RenderColor(red: 1, green: 1, blue: 1, alpha: 0.5),
+    maxRadius: CGFloat = 40,
+    enabled: Bool = true
+  ) {
+    self.position = position
+    self.progress = progress
+    self.color = color
+    self.maxRadius = maxRadius
+    self.enabled = enabled
+  }
+}
+
 public struct RenderFrame {
   public var outputSize: CGSize
   public var background: RenderBackground
   public var screen: ScreenLayer
   public var cursor: CursorLayer?
+  public var clickHighlight: ClickHighlight?
 
   public init(
     outputSize: CGSize,
     background: RenderBackground,
     screen: ScreenLayer,
-    cursor: CursorLayer? = nil
+    cursor: CursorLayer? = nil,
+    clickHighlight: ClickHighlight? = nil
   ) {
     self.outputSize = outputSize
     self.background = background
     self.screen = screen
     self.cursor = cursor
+    self.clickHighlight = clickHighlight
   }
 }
 

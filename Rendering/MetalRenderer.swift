@@ -5,6 +5,10 @@ import Metal
 import MetalKit
 
 public final class MetalRenderer {
+  private static let verticesPerQuad = 6
+  private static let maxQuadsPerFrame = 32
+  private static let inFlightBufferCount = 3
+
   public struct Configuration: Equatable {
     public var pixelFormat: MTLPixelFormat
 
@@ -40,18 +44,33 @@ public final class MetalRenderer {
     var color: SIMD4<Float>
   }
 
+  private struct ClickRippleUniforms {
+    var size: SIMD2<Float>
+    var progress: Float
+    var color: SIMD4<Float>
+    var maxRadius: Float
+    var padding: Float = 0
+  }
+
   public let device: MTLDevice
   public var renderConfiguration: RenderConfiguration
   public var cursorProvider: ((RenderTime, RenderContext) -> CursorLayer?)?
+  public var clickHighlightProvider: ((RenderTime, RenderContext) -> ClickHighlight?)?
   public var screenSourceRectProvider: ((RenderTime, RenderContext) -> CGRect?)?
 
   private let commandQueue: MTLCommandQueue
   private let backgroundPipeline: MTLRenderPipelineState
   private let texturedPipeline: MTLRenderPipelineState
   private let roundedColorPipeline: MTLRenderPipelineState
+  private let clickRipplePipeline: MTLRenderPipelineState
   private let samplerState: MTLSamplerState
   private let vertexBuffer: MTLBuffer
   private let textureLoader: MTKTextureLoader
+  private let inFlightSemaphore = DispatchSemaphore(value: MetalRenderer.inFlightBufferCount)
+  private let frameVertexCapacity: Int
+  private var frameVertexOffset: Int = 0
+  private var frameBaseOffset: Int = 0
+  private var frameIndex: Int = 0
 
   private var textureCache: CVMetalTextureCache
   private var pixelBufferPool: CVPixelBufferPool?
@@ -96,7 +115,8 @@ public final class MetalRenderer {
       let vertexFunction = library.makeFunction(name: "vertexQuad"),
       let backgroundFunction = library.makeFunction(name: "fragmentBackground"),
       let texturedFunction = library.makeFunction(name: "fragmentTexturedRounded"),
-      let roundedColorFunction = library.makeFunction(name: "fragmentSolidRounded")
+      let roundedColorFunction = library.makeFunction(name: "fragmentSolidRounded"),
+      let clickRippleFunction = library.makeFunction(name: "fragmentClickRipple")
     else {
       throw RenderingError.shaderLibraryNotFound
     }
@@ -134,6 +154,14 @@ public final class MetalRenderer {
       pixelFormat: configuration.pixelFormat
     )
 
+    self.clickRipplePipeline = try MetalRenderer.makePipelineState(
+      device: device,
+      vertexFunction: vertexFunction,
+      fragmentFunction: clickRippleFunction,
+      vertexDescriptor: vertexDescriptor,
+      pixelFormat: configuration.pixelFormat
+    )
+
     let samplerDescriptor = MTLSamplerDescriptor()
     samplerDescriptor.minFilter = .linear
     samplerDescriptor.magFilter = .linear
@@ -144,11 +172,15 @@ public final class MetalRenderer {
     }
     self.samplerState = samplerState
 
-    let vertexBufferLength = MemoryLayout<Vertex>.stride * 6
+    let bytesPerQuad = MemoryLayout<Vertex>.stride * MetalRenderer.verticesPerQuad
+    let vertexBufferLength = bytesPerQuad
+      * MetalRenderer.maxQuadsPerFrame
+      * MetalRenderer.inFlightBufferCount
     guard let vertexBuffer = device.makeBuffer(length: vertexBufferLength, options: [.storageModeShared]) else {
       throw RenderingError.deviceUnavailable
     }
     self.vertexBuffer = vertexBuffer
+    self.frameVertexCapacity = bytesPerQuad * MetalRenderer.maxQuadsPerFrame
   }
 
   public func makeTexture(from image: CGImage, srgb: Bool = true) throws -> MTLTexture {
@@ -179,8 +211,19 @@ public final class MetalRenderer {
       throw RenderingError.invalidOutputSize
     }
 
+    beginFrame()
+    var didCommit = false
+    defer {
+      if !didCommit {
+        inFlightSemaphore.signal()
+      }
+    }
+
     guard let commandBuffer = commandQueue.makeCommandBuffer() else {
       throw RenderingError.deviceUnavailable
+    }
+    commandBuffer.addCompletedHandler { [weak self] _ in
+      self?.inFlightSemaphore.signal()
     }
     let renderPass = MTLRenderPassDescriptor()
     renderPass.colorAttachments[0].texture = texture
@@ -200,6 +243,7 @@ public final class MetalRenderer {
       throw error
     }
     commandBuffer.commit()
+    didCommit = true
     if waitUntilCompleted {
       commandBuffer.waitUntilCompleted()
     }
@@ -214,8 +258,19 @@ public final class MetalRenderer {
           let renderPass = view.currentRenderPassDescriptor else {
       return
     }
+    beginFrame()
+    var didCommit = false
+    defer {
+      if !didCommit {
+        inFlightSemaphore.signal()
+      }
+    }
+
     guard let commandBuffer = commandQueue.makeCommandBuffer() else {
       throw RenderingError.deviceUnavailable
+    }
+    commandBuffer.addCompletedHandler { [weak self] _ in
+      self?.inFlightSemaphore.signal()
     }
     guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
       throw RenderingError.deviceUnavailable
@@ -225,6 +280,7 @@ public final class MetalRenderer {
     encoder.endEncoding()
     commandBuffer.present(drawable)
     commandBuffer.commit()
+    didCommit = true
     if waitUntilCompleted {
       commandBuffer.waitUntilCompleted()
     }
@@ -386,6 +442,41 @@ public final class MetalRenderer {
     encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
   }
 
+  private func drawClickHighlight(frame: RenderFrame, encoder: MTLRenderCommandEncoder) throws {
+    guard let highlight = frame.clickHighlight,
+          highlight.enabled,
+          highlight.progress < 1.0 else {
+      return
+    }
+
+    // Calculate the rect for the ripple effect
+    let rippleSize = highlight.maxRadius * 2
+    let rect = CGRect(
+      x: highlight.position.x - highlight.maxRadius,
+      y: highlight.position.y - highlight.maxRadius,
+      width: rippleSize,
+      height: rippleSize
+    )
+
+    encoder.setRenderPipelineState(clickRipplePipeline)
+
+    var uniforms = ClickRippleUniforms(
+      size: SIMD2<Float>(Float(rect.width), Float(rect.height)),
+      progress: highlight.progress,
+      color: highlight.color.toSIMD4(),
+      maxRadius: Float(highlight.maxRadius)
+    )
+
+    drawQuad(
+      rect: rect,
+      outputSize: frame.outputSize,
+      uvRect: CGRect(x: 0, y: 0, width: 1, height: 1),
+      encoder: encoder
+    )
+    encoder.setFragmentBytes(&uniforms, length: MemoryLayout<ClickRippleUniforms>.stride, index: 0)
+    encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+  }
+
   private func makePixelBuffer(size: CGSize) throws -> CVPixelBuffer {
     let width = Int(size.width.rounded())
     let height = Int(size.height.rounded())
@@ -487,11 +578,23 @@ public final class MetalRenderer {
   ) {
     let vertices = quadVertices(rect: rect, outputSize: outputSize, uvRect: uvRect)
     let length = vertices.count * MemoryLayout<Vertex>.stride
+    precondition(length == MemoryLayout<Vertex>.stride * MetalRenderer.verticesPerQuad)
+    precondition(frameVertexOffset + length <= frameVertexCapacity, "Exceeded max quads per frame.")
     vertices.withUnsafeBytes { bytes in
       guard let baseAddress = bytes.baseAddress else { return }
-      vertexBuffer.contents().copyMemory(from: baseAddress, byteCount: length)
+      let destination = vertexBuffer.contents().advanced(by: frameBaseOffset + frameVertexOffset)
+      destination.copyMemory(from: baseAddress, byteCount: length)
     }
-    encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+    encoder.setVertexBuffer(vertexBuffer, offset: frameBaseOffset + frameVertexOffset, index: 0)
+    frameVertexOffset += length
+  }
+
+  private func beginFrame() {
+    inFlightSemaphore.wait()
+    let inFlightIndex = frameIndex % MetalRenderer.inFlightBufferCount
+    frameIndex += 1
+    frameBaseOffset = inFlightIndex * frameVertexCapacity
+    frameVertexOffset = 0
   }
 
   private func quadVertices(rect: CGRect, outputSize: CGSize, uvRect: CGRect) -> [Vertex] {
@@ -552,6 +655,7 @@ public final class MetalRenderer {
   private func encode(frame: RenderFrame, encoder: MTLRenderCommandEncoder) throws {
     try drawBackground(frame: frame, encoder: encoder)
     try drawScreen(frame: frame, encoder: encoder)
+    try drawClickHighlight(frame: frame, encoder: encoder)
     try drawCursor(frame: frame, encoder: encoder)
   }
 }
