@@ -37,10 +37,13 @@ final class ProjectManager {
     func load(from packageURL: URL) throws -> ProjectModel {
         let projectJSON = packageURL.appendingPathComponent(ProjectModel.projectFilename)
         let data = try Data(contentsOf: projectJSON)
-        return try ProjectModel.decodeJSON(data)
+        let project = try ProjectModel.decodeJSON(data)
+        try ProjectValidator.validateOrThrow(project)
+        return project
     }
 
     func save(_ project: ProjectModel, to packageURL: URL) throws {
+        try ProjectValidator.validateOrThrow(project)
         try fileManager.createDirectory(at: packageURL, withIntermediateDirectories: true)
         let projectJSON = packageURL.appendingPathComponent(ProjectModel.projectFilename)
         let data = try project.encodedJSON(prettyPrinted: true)

@@ -94,6 +94,15 @@ public struct TimeMapping: Equatable {
     return nil
   }
 
+  // Spec-friendly aliases.
+  public func sourceToOutput(_ sourceTime: Double) -> Double? {
+    outputTime(for: sourceTime)
+  }
+
+  public func outputToSource(_ outputTime: Double) -> Double? {
+    sourceTime(for: outputTime)
+  }
+
   private struct SpeedInterval {
     var start: Double
     var end: Double
@@ -140,7 +149,8 @@ public struct TimeMapping: Equatable {
       if end <= start {
         return nil
       }
-      return SpeedSegment(start: start, end: end, rate: segment.rate)
+      let rate = max(0.1, segment.rate)
+      return SpeedSegment(start: start, end: end, rate: rate)
     }
 
     for segment in clampedSegments {

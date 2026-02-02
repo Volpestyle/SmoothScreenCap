@@ -21,6 +21,20 @@ struct ContentView: View {
             }
         }
         .preferredColorScheme(.dark)
+        .alert("Engine Version Warning", isPresented: Binding(
+            get: { appState.engineVersionWarning != nil },
+            set: { isPresented in
+                if !isPresented {
+                    appState.engineVersionWarning = nil
+                }
+            }
+        )) {
+            Button("OK", role: .cancel) {
+                appState.engineVersionWarning = nil
+            }
+        } message: {
+            Text(appState.engineVersionWarning ?? "")
+        }
     }
 }
 

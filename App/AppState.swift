@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import AppKit
 import ProjectModel
 import ProjectPackaging
 import TimeMapping
@@ -10,6 +11,7 @@ import Rendering
 import Recording
 import ScreenCaptureKit
 import AVFoundation
+import ClickSound
 
 @MainActor
 final class AppState: ObservableObject {
@@ -81,6 +83,8 @@ final class AppState: ObservableObject {
     // MARK: - Recording Engine
     private var screenRecorder: ScreenRecorder?
     private var recordingTimer: Timer?
+    private var clickSoundPlayer: ClickSoundPlayer?
+    private var lastPreviewSourceTime: TimeInterval?
 
     // MARK: - Source Preview
     let sourcePreviewManager = SourcePreviewManager()
@@ -100,6 +104,9 @@ final class AppState: ObservableObject {
     @Published var exportProgress: Double = 0
     @Published var exportError: String?
     @Published var exportSuccess: URL?
+
+    // MARK: - Version Warnings
+    @Published var engineVersionWarning: String?
 
     // MARK: - Playback State
     @Published var isPlaying = false
@@ -130,9 +137,16 @@ final class AppState: ObservableObject {
         currentProject?.edit.speedSegments ?? []
     }
 
+    var cursorOverrides: [CursorOverride] {
+        currentProject?.edit.cursorOverrides ?? []
+    }
+
     // MARK: - Initialization
 
     private let projectManager = ProjectManager()
+    private var runtimeEngineVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ProjectModel.currentEngineVersion
+    }
 
     init() {
         loadRecentProjects()
@@ -155,8 +169,10 @@ final class AppState: ObservableObject {
             currentProject = project
             currentProjectURL = url
             rebuildTimeMapper()
+            warnIfEngineVersionMismatch(project)
             currentSection = .editor
             currentTime = 0
+            syncClickSoundPlayer(with: project.edit.cursorSettings ?? CursorSettings())
 
             // Initialize preview renderer
             Task {
@@ -200,7 +216,15 @@ final class AppState: ObservableObject {
         currentPreviewFrame = await renderer.renderFrame(
             at: sourceTime,
             background: project.edit.background,
-            outputSize: resolvedSize
+            outputSize: resolvedSize,
+            cursorSettings: project.edit.cursorSettings,
+            cursorOverrides: project.edit.cursorOverrides
+        )
+
+        handleClickSounds(
+            renderer: renderer,
+            sourceTime: sourceTime,
+            cursorSettings: project.edit.cursorSettings
         )
     }
 
@@ -215,7 +239,7 @@ final class AppState: ObservableObject {
 
     // MARK: - Time Mapping
 
-    private func rebuildTimeMapper() {
+    func rebuildTimeMapper() {
         guard let project = currentProject,
               let duration = project.assets.screen.duration else {
             timeMapper = nil
@@ -263,6 +287,63 @@ final class AppState: ObservableObject {
 
     func togglePlayback() {
         isPlaying.toggle()
+        if isPlaying {
+            lastPreviewSourceTime = currentSourceTime
+        }
+    }
+
+    private func syncClickSoundPlayer(with settings: CursorSettings) {
+        guard let soundURL = ClickSoundAsset.bundledURL() else { return }
+        if let player = clickSoundPlayer {
+            player.isEnabled = settings.clickSoundEnabled
+            player.volume = Float(settings.clickSoundVolume)
+        } else {
+            clickSoundPlayer = ClickSoundPlayer(
+                soundURL: soundURL,
+                volume: Float(settings.clickSoundVolume),
+                isEnabled: settings.clickSoundEnabled
+            )
+        }
+    }
+
+    private func makeClickSoundConfiguration(settings: CursorSettings) -> ClickSoundConfiguration? {
+        guard settings.clickSoundEnabled, let soundURL = ClickSoundAsset.bundledURL() else { return nil }
+        return ClickSoundConfiguration(soundURL: soundURL, volume: settings.clickSoundVolume)
+    }
+
+    private func handleClickSounds(
+        renderer: PreviewRenderer,
+        sourceTime: TimeInterval,
+        cursorSettings: CursorSettings?
+    ) {
+        guard isPlaying else {
+            lastPreviewSourceTime = sourceTime
+            return
+        }
+
+        let settings = cursorSettings ?? CursorSettings()
+        guard settings.clickSoundEnabled else {
+            lastPreviewSourceTime = sourceTime
+            return
+        }
+
+        if clickSoundPlayer == nil {
+            syncClickSoundPlayer(with: settings)
+        } else {
+            clickSoundPlayer?.volume = Float(settings.clickSoundVolume)
+            clickSoundPlayer?.isEnabled = settings.clickSoundEnabled
+        }
+
+        let previousTime = lastPreviewSourceTime ?? sourceTime
+        guard sourceTime >= previousTime else {
+            lastPreviewSourceTime = sourceTime
+            return
+        }
+        let clicks = renderer.clickTimes(between: previousTime, end: sourceTime)
+        for _ in clicks {
+            clickSoundPlayer?.play()
+        }
+        lastPreviewSourceTime = sourceTime
     }
 
     // MARK: - Source Management
@@ -459,23 +540,21 @@ final class AppState: ObservableObject {
         var width: Int
         var height: Int
         var captureRect: CGRect?
+        let includedAudioApps: [SCRunningApplication] = content.applications.filter { app in
+            let bundleID = app.bundleIdentifier
+            return selectedAudioAppBundleIDs.contains(bundleID)
+        }
         let applyAudioFilter = systemAudioEnabled && !selectedAudioAppBundleIDs.isEmpty
-        let excludedAudioApps: [SCRunningApplication] = applyAudioFilter
-            ? content.applications.filter { app in
-                let bundleID = app.bundleIdentifier
-                return !selectedAudioAppBundleIDs.contains(bundleID)
-            }
-            : []
 
         switch source {
         case .display(let display):
             if applyAudioFilter {
-                filter = SCContentFilter(display: display, excludingApplications: excludedAudioApps, exceptingWindows: content.windows)
+                filter = SCContentFilter(display: display, including: includedAudioApps, exceptingWindows: content.windows)
             } else {
                 filter = SCContentFilter(display: display, excludingWindows: [])
             }
-            width = display.width ?? 1920
-            height = display.height ?? 1080
+            width = display.width
+            height = display.height
             captureRect = nil
         case .window(let window):
             filter = SCContentFilter(desktopIndependentWindow: window)
@@ -487,7 +566,7 @@ final class AppState: ObservableObject {
                 throw ScreenRecorder.RecordingError.missingVideoDimensions
             }
             if applyAudioFilter {
-                filter = SCContentFilter(display: display, excludingApplications: excludedAudioApps, exceptingWindows: content.windows)
+                filter = SCContentFilter(display: display, including: includedAudioApps, exceptingWindows: content.windows)
             } else {
                 filter = SCContentFilter(display: display, excludingWindows: [])
             }
@@ -537,6 +616,7 @@ final class AppState: ObservableObject {
 
                 let options = ProjectPackagingOptions(
                     appVersion: appVersion,
+                    engineVersion: runtimeEngineVersion,
                     defaults: .standard,
                     autoZoomEnabled: autoZoomEnabled,
                     autoZoomConfig: AutoZoom.Config(),
@@ -610,6 +690,13 @@ final class AppState: ObservableObject {
         currentProject = project
     }
 
+    func updateCursorSettings(_ cursorSettings: CursorSettings) {
+        guard var project = currentProject else { return }
+        project.edit.cursorSettings = cursorSettings
+        currentProject = project
+        syncClickSoundPlayer(with: cursorSettings)
+    }
+
     func generateAutoZoom(from clicks: [AutoZoom.ClickEvent]) {
         guard var project = currentProject,
               let duration = project.assets.screen.duration,
@@ -629,6 +716,89 @@ final class AppState: ObservableObject {
 
     // MARK: - Export
 
+    private func configureCursorOverlay(
+        renderer: MetalRenderer,
+        project: ProjectModel,
+        projectURL: URL
+    ) {
+        guard let width = project.assets.screen.width,
+              let height = project.assets.screen.height else { return }
+        let sourceSize = CGSize(width: width, height: height)
+        guard sourceSize.width > 0, sourceSize.height > 0 else { return }
+
+        let eventsURL = projectURL.appendingPathComponent(project.assets.events.path)
+        guard let interpolator = try? CursorInterpolator(url: eventsURL) else { return }
+        guard let cursorTexture = try? CursorTextureFactory.makeCursorTexture(device: renderer.device) else { return }
+
+        let settings = project.edit.cursorSettings ?? CursorSettings()
+        let overrides = project.edit.cursorOverrides
+        let cache = CursorStateCache(
+            interpolator: interpolator,
+            settings: settings,
+            overrides: overrides
+        )
+        let padding = renderer.renderConfiguration.screenPadding
+
+        let screenPosition: (CGPoint, CGSize) -> CGPoint = { point, outputSize in
+            let screenFrame = RenderLayout.aspectFitRect(
+                sourceSize: sourceSize,
+                in: outputSize,
+                padding: padding
+            )
+            let scaleX = screenFrame.width / sourceSize.width
+            let scaleY = screenFrame.height / sourceSize.height
+            let screenX = screenFrame.minX + point.x * scaleX
+            let screenY = screenFrame.minY + point.y * scaleY
+            return CGPoint(x: screenX, y: screenY)
+        }
+
+        renderer.cursorProvider = { time, context in
+            let state = cache.state(at: time.sourceTime)
+            guard state.isVisible else { return nil }
+            let position = screenPosition(state.position, context.outputSize)
+            let baseCursorSize: CGFloat = 24
+            let userScale = CGFloat(settings.scale)
+            let cursorSize = CGSize(
+                width: baseCursorSize * userScale,
+                height: baseCursorSize * userScale
+            )
+            let clickScale: CGFloat = state.isClicking ? 1.3 : 1.0
+            let scaledSize = CGSize(
+                width: cursorSize.width * clickScale,
+                height: cursorSize.height * clickScale
+            )
+            return CursorLayer(
+                texture: cursorTexture,
+                size: scaledSize,
+                position: position,
+                hotspot: CGPoint(x: scaledSize.width / 2, y: scaledSize.height / 2),
+                opacity: Float(state.opacity)
+            )
+        }
+
+        renderer.clickHighlightProvider = { time, context in
+            let state = cache.state(at: time.sourceTime)
+            guard settings.clickHighlightEnabled, state.clickProgress > 0 else { return nil }
+            let position = screenPosition(state.position, context.outputSize)
+            let highlightColor = RenderColor(hex: settings.clickHighlightColor)
+                ?? RenderColor(red: 1, green: 1, blue: 1, alpha: 1)
+            let colorWithOpacity = RenderColor(
+                red: highlightColor.red,
+                green: highlightColor.green,
+                blue: highlightColor.blue,
+                alpha: Float(settings.clickHighlightOpacity)
+            )
+            let maxRadius = CGFloat(40 * settings.scale)
+            return ClickHighlight(
+                position: position,
+                progress: Float(1.0 - state.clickProgress),
+                color: colorWithOpacity,
+                maxRadius: maxRadius,
+                enabled: true
+            )
+        }
+    }
+
     func startExport(preset: ExportPreset, outputURL: URL) {
         guard let project = currentProject,
               let projectURL = currentProjectURL,
@@ -645,12 +815,16 @@ final class AppState: ObservableObject {
         let sourceVideoURL = projectURL.appendingPathComponent(project.assets.screen.path)
         let systemAudioURL = project.assets.systemAudio.map { projectURL.appendingPathComponent($0.path) }
         let micAudioURL = project.assets.mic.map { projectURL.appendingPathComponent($0.path) }
+        let eventsURL = projectURL.appendingPathComponent(project.assets.events.path)
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let cursorSettings = project.edit.cursorSettings ?? CursorSettings()
+        let clickSoundConfig = makeClickSoundConfiguration(settings: cursorSettings)
 
         let renderer: VideoFrameRenderer
         do {
             let metalRenderer = try MetalRenderer()
             metalRenderer.renderConfiguration = RenderConfiguration.fromProjectBackground(project.edit.background)
+            configureCursorOverlay(renderer: metalRenderer, project: project, projectURL: projectURL)
             renderer = metalRenderer
         } catch {
             isExporting = false
@@ -662,6 +836,7 @@ final class AppState: ObservableObject {
             sourceVideoURL: sourceVideoURL,
             systemAudioURL: systemAudioURL,
             microphoneAudioURL: micAudioURL,
+            eventsURL: eventsURL,
             timeMapping: mapping,
             outputURL: outputURL,
             preset: preset,
@@ -671,7 +846,9 @@ final class AppState: ObservableObject {
                 Task { @MainActor in
                     self?.exportProgress = progress
                 }
-            }
+            },
+            engineVersion: runtimeEngineVersion,
+            clickSound: clickSoundConfig
         )
 
         Task {
@@ -702,6 +879,118 @@ final class AppState: ObservableObject {
         startExport(preset: preset, outputURL: outputURL)
     }
 
+    func exportToClipboard(preset: ExportPreset) {
+        guard let project = currentProject,
+              let projectURL = currentProjectURL,
+              let mapping = timeMapper else {
+            exportError = "No project loaded"
+            return
+        }
+
+        isExporting = true
+        exportProgress = 0
+        exportError = nil
+        exportSuccess = nil
+
+        let sourceVideoURL = projectURL.appendingPathComponent(project.assets.screen.path)
+        let systemAudioURL = project.assets.systemAudio.map { projectURL.appendingPathComponent($0.path) }
+        let micAudioURL = project.assets.mic.map { projectURL.appendingPathComponent($0.path) }
+        let eventsURL = projectURL.appendingPathComponent(project.assets.events.path)
+        let exportTempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let cursorSettings = project.edit.cursorSettings ?? CursorSettings()
+        let clickSoundConfig = makeClickSoundConfiguration(settings: cursorSettings)
+
+        let renderer: VideoFrameRenderer
+        do {
+            let metalRenderer = try MetalRenderer()
+            metalRenderer.renderConfiguration = RenderConfiguration.fromProjectBackground(project.edit.background)
+            configureCursorOverlay(renderer: metalRenderer, project: project, projectURL: projectURL)
+            renderer = metalRenderer
+        } catch {
+            isExporting = false
+            exportError = "Failed to initialize Metal renderer: \(error.localizedDescription)"
+            return
+        }
+
+        let request = ExportRequest(
+            sourceVideoURL: sourceVideoURL,
+            systemAudioURL: systemAudioURL,
+            microphoneAudioURL: micAudioURL,
+            eventsURL: eventsURL,
+            timeMapping: mapping,
+            outputURL: exportTempDir.appendingPathComponent("ssc_clipboard.mp4"),
+            preset: preset,
+            renderer: renderer,
+            temporaryDirectory: exportTempDir,
+            onProgress: { [weak self] progress in
+                Task { @MainActor in
+                    self?.exportProgress = progress
+                }
+            },
+            engineVersion: runtimeEngineVersion,
+            clickSound: clickSoundConfig
+        )
+
+        Task {
+            do {
+                try FileManager.default.createDirectory(at: exportTempDir, withIntermediateDirectories: true)
+                let engine = ExportEngine()
+                try await engine.exportToClipboard(request)
+
+                await MainActor.run {
+                    isExporting = false
+                    exportProgress = 1.0
+                    // Use a special marker URL to indicate clipboard success
+                    exportSuccess = URL(fileURLWithPath: "/clipboard")
+                }
+
+                try? FileManager.default.removeItem(at: exportTempDir)
+            } catch {
+                await MainActor.run {
+                    isExporting = false
+                    exportError = error.localizedDescription
+                }
+                try? FileManager.default.removeItem(at: exportTempDir)
+            }
+        }
+    }
+
+    // MARK: - Version checks
+
+    private func warnIfEngineVersionMismatch(_ project: ProjectModel) {
+        let current = runtimeEngineVersion
+        let projectVersion = project.engineVersion
+        engineVersionWarning = nil
+        let comparison = compareSemanticVersions(projectVersion, current)
+        if comparison == .orderedAscending {
+            engineVersionWarning = "This project was created with engine \(projectVersion). You're running \(current). Export results may differ."
+        } else if comparison == .orderedDescending {
+            engineVersionWarning = "This project was created with newer engine \(projectVersion). You're running \(current). Export results may differ."
+        }
+    }
+
+    private func compareSemanticVersions(_ lhs: String, _ rhs: String) -> ComparisonResult {
+        let lhsParts = semanticParts(lhs)
+        let rhsParts = semanticParts(rhs)
+        let count = max(lhsParts.count, rhsParts.count)
+        for index in 0..<count {
+            let left = index < lhsParts.count ? lhsParts[index] : 0
+            let right = index < rhsParts.count ? rhsParts[index] : 0
+            if left < right { return .orderedAscending }
+            if left > right { return .orderedDescending }
+        }
+        return .orderedSame
+    }
+
+    private func semanticParts(_ version: String) -> [Int] {
+        let base = version.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: true).first ?? ""
+        return base.split(separator: ".").map { Int($0) ?? 0 }
+    }
+
+    var isClipboardExportSuccess: Bool {
+        exportSuccess?.path == "/clipboard"
+    }
+
     func clearExportState() {
         exportError = nil
         exportSuccess = nil
@@ -709,6 +998,34 @@ final class AppState: ObservableObject {
 }
 
 // MARK: - Supporting Types
+
+private final class CursorStateCache {
+    private let interpolator: CursorInterpolator
+    private let settings: CursorSettings
+    private let overrides: [CursorOverride]
+    private var lastTime: Double?
+    private var lastState: CursorInterpolator.CursorState?
+
+    init(interpolator: CursorInterpolator, settings: CursorSettings, overrides: [CursorOverride]) {
+        self.interpolator = interpolator
+        self.settings = settings
+        self.overrides = overrides
+    }
+
+    func state(at time: Double) -> CursorInterpolator.CursorState {
+        if lastTime == time, let lastState {
+            return lastState
+        }
+        let state = interpolator.cursorState(
+            at: time,
+            cursorSettings: settings,
+            cursorOverrides: overrides
+        )
+        lastTime = time
+        lastState = state
+        return state
+    }
+}
 
 struct ProjectMetadata: Identifiable {
     var id: URL { url ?? URL(fileURLWithPath: "/") }
