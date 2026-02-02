@@ -61,6 +61,7 @@ final class ProjectPackagingTests: XCTestCase {
     XCTAssertEqual(project.edit.exportPresets.count, ProjectDefaults.standard.exportPresets.count)
     XCTAssertNotNil(project.assets.screen.width)
     XCTAssertNotNil(project.assets.screen.height)
+    XCTAssertEqual(project.engineVersion, ProjectModel.currentEngineVersion)
   }
 
   func testWebcamMetadataOverrides() throws {

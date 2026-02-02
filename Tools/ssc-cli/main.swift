@@ -116,6 +116,7 @@ struct SSCCLI {
 
         let options = ProjectPackagingOptions(
             appVersion: appVersion,
+            engineVersion: appVersion,
             defaults: .standard,
             autoZoomEnabled: autoZoomEnabled,
             autoZoomConfig: AutoZoom.Config(),

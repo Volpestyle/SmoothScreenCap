@@ -79,6 +79,7 @@ Core objects
     - speedSegments[]
     - zoomSegments[]
     - cursorOverrides[]
+    - cursorSettings
     - background settings
     - motion settings
     - export presets
@@ -102,8 +103,10 @@ Auto-zoom algorithm
 Cursor smoothing and rendering
 - Resample cursor positions at output frame times.
 - Apply one smoothing option (default): One Euro filter.
-- Remove micro-shakes with a small movement threshold.
+- Remove micro-shakes with a small movement threshold (2 px).
 - Hide cursor when idle for N ms.
+- Cursor settings include scale, click highlight, click sound, and smoothing parameters (minCutoff, beta, dCutoff).
+- cursorOverrides can disable smoothing or hide the cursor for specific ranges.
 - Optional rotation based on velocity direction.
 
 Rendering engine (Metal)
@@ -136,6 +139,7 @@ Audio
 - Build AVMutableComposition for mic and system audio.
 - Apply time scaling per segment with pitch preservation.
 - Export to AAC, then mux with video.
+- Optional click sound track mixed at click event output times.
 - Optional FFmpeg module if AVFoundation has limitations (keep optional).
 
 Determinism
@@ -184,3 +188,49 @@ Privacy and security
 - Optional build flag for crash reporting.
 - Event logs store typing activity only, not keystrokes.
 - Privacy mode toggle to disable event logging entirely.
+
+---
+
+## Implementation Notes
+
+### Zoom Block Manual Editing (C2) - Implemented 2026-02-01
+
+**Features:**
+- Double-click zoom segment in timeline to enter target edit mode
+- Zoom target rectangle overlay displayed on preview
+- Drag overlay to reposition zoom focus point
+- Drag corner handles to resize/adjust zoom level
+- Context menu on zoom segments: "Convert to Manual", "Edit Target", "Delete"
+- Automatic mode conversion when target is manually adjusted
+
+**Key components:**
+- `ZoomTargetOverlay` view: Full overlay for editing zoom target rectangles
+- `InteractiveSegment` view: Updated with double-click detection and context menu
+- `TimelineTrack` view: Extended with `onSegmentDoubleClick`, `onConvertToManual`, `onDeleteSegment` callbacks
+
+**Data flow:**
+1. User double-clicks zoom segment → `editingZoomIndex` set in `TimelinePanel`
+2. `PreviewPanel` shows `ZoomTargetOverlay` when `editingZoomIndex` is set
+3. Drag/resize gestures update `ZoomSegment.targetRect`, `targetPoint`, and `scale`
+4. Mode automatically set to `.manual` on any edit
+5. Changes saved via `appState.saveCurrentProject()`
+
+### Zoom Sidebar Enhancements (C3) - Implemented 2026-02-01
+
+**Features:**
+- Click segment row to jump playhead to segment start
+- Play icon on each row for quick navigation
+- Numeric zoom level editing (click scale to edit, type value, press Enter)
+- Auto-zoom toggle with regenerate button
+- Visual distinction for auto vs manual segments (purple/orange)
+- Zoom level clamped to 1.0x - 3.0x per spec
+
+**Key components:**
+- `ZoomTab` view: Added auto-zoom toggle and regenerate button
+- `ZoomSegmentRow` view: Added click-to-jump, numeric scale input, mode indicator
+- `EventLogFileData` struct: Private decoder for events.jsonl format
+
+**Data flow:**
+1. Regenerate triggers → loads events.jsonl → extracts mouseDown events
+2. Calls `appState.generateAutoZoom()` which uses `AutoZoom.generateSegments()`
+3. Jump-to-segment calls `appState.seek(to: segment.start)`

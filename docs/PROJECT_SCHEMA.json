@@ -7,6 +7,7 @@
     "id": {"type": "string", "format": "uuid"},
     "createdAt": {"type": "string", "format": "date-time"},
     "version": {"type": "string"},
+    "engineVersion": {"type": "string"},
     "appVersion": {"type": "string"},
     "assets": {"$ref": "#/definitions/assets"},
     "edit": {"$ref": "#/definitions/edit"}
@@ -122,6 +123,24 @@
         }
       ]
     },
+    "cursorSettings": {
+      "type": "object",
+      "properties": {
+        "scale": {"type": "number", "minimum": 0.1},
+        "clickHighlightEnabled": {"type": "boolean"},
+        "clickHighlightColor": {"type": "string"},
+        "clickHighlightOpacity": {"type": "number", "minimum": 0, "maximum": 1},
+        "clickSoundEnabled": {"type": "boolean"},
+        "clickSoundVolume": {"type": "number", "minimum": 0, "maximum": 1},
+        "idleHideEnabled": {"type": "boolean"},
+        "idleHideDelay": {"type": "number", "minimum": 0},
+        "smoothingEnabled": {"type": "boolean"},
+        "smoothingMinCutoff": {"type": "number", "minimum": 0},
+        "smoothingBeta": {"type": "number", "minimum": 0},
+        "smoothingDCutoff": {"type": "number", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
     "background": {
       "type": "object",
       "required": ["type"],
@@ -193,6 +212,7 @@
         "speedSegments": {"type": "array", "items": {"$ref": "#/definitions/speedSegment"}},
         "zoomSegments": {"type": "array", "items": {"$ref": "#/definitions/zoomSegment"}},
         "cursorOverrides": {"type": "array", "items": {"$ref": "#/definitions/cursorOverride"}},
+        "cursorSettings": {"$ref": "#/definitions/cursorSettings"},
         "background": {"$ref": "#/definitions/background"},
         "motion": {"$ref": "#/definitions/motion"},
         "exportPresets": {"type": "array", "items": {"$ref": "#/definitions/exportPreset"}}

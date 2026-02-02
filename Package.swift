@@ -29,9 +29,21 @@ let package = Package(
         "ProjectPackaging",
         "ExportEngine",
         "Rendering",
-        "Recording"
+        "Recording",
+        "CursorSmoothing",
+        "ClickSound"
       ],
-      path: "App"
+      path: "App",
+      resources: [.process("Resources")]
+    ),
+    .target(
+      name: "CursorSmoothing",
+      path: "Core/CursorSmoothing"
+    ),
+    .target(
+      name: "ClickSound",
+      path: "Core/ClickSound",
+      resources: [.process("Resources")]
     ),
     .target(
       name: "ProjectModel",
@@ -69,7 +81,7 @@ let package = Package(
     ),
     .target(
       name: "ExportEngine",
-      dependencies: ["ProjectModel", "TimeMapping", "Rendering"],
+      dependencies: ["ProjectModel", "TimeMapping", "Rendering", "EventLog"],
       path: "Export"
     ),
     .executableTarget(

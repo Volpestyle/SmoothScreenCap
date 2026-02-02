@@ -86,18 +86,23 @@ SmoothScreenCap/
 │       ├── LibraryView.swift
 │       ├── RecordingView.swift
 │       ├── EditorView.swift
-│       └── SettingsView.swift
+│       ├── SettingsView.swift
+│       ├── RegionSelector.swift
+│       └── SpeakerNotesWindow.swift
 ├── Core/
-│   ├── ProjectModel/       Project data model
-│   ├── TimeMapping/        Time domain conversion
-│   ├── AutoZoom/           Zoom algorithm
-│   └── EventLog/           Event capture
-├── Recording/              ScreenCaptureKit backend
-├── Rendering/              Metal renderer
-├── Export/                 Export engine
+│   ├── ProjectModel/       Project data model + JSON serialization
+│   ├── TimeMapping/        Source ↔ output time conversion
+│   ├── AutoZoom/           Click-based zoom generation
+│   ├── EventLog/           Mouse/keyboard event capture (JSONL)
+│   ├── CursorSmoothing/    One Euro filter for cursor jitter
+│   ├── ClickSound/         Polyphonic click sound player
+│   └── ProjectPackaging/   Project asset bundling
+├── Recording/              ScreenCaptureKit + AVCaptureSession
+├── Rendering/              Metal GPU compositor
+├── Export/                 Video/audio composition engine
 ├── Tools/
 │   └── ssc-cli/            Command-line interface
-├── Tests/                  Unit tests
+├── Tests/                  Unit tests (8 test suites)
 └── docs/                   Documentation
     ├── SMOOTHSCREENCAP_PRODUCT_SPEC.md
     ├── SMOOTHSCREENCAP_TECHNICAL_SPEC.md
@@ -114,19 +119,84 @@ SmoothScreenCap/
 
 ## Status
 
-**Early development** — UI scaffolding complete, core modules are stubs.
+**Core complete** — All major systems implemented and tested. Ready for UI polish and release.
 
 ### What's built
-- Full SwiftUI app with Library, Recording, and Editor views
-- Navigation, state management, and component library
+
+**Core Modules**
+- **ProjectModel** — Full data model with JSON serialization, versioning, codec support
+- **TimeMapping** — Bidirectional source ↔ output time conversion with cuts and speed segments
+- **AutoZoom** — Click-based zoom generation with configurable focus modes and padding
+- **EventLog** — Mouse, scroll, and keyboard event capture in JSONL format
+- **CursorSmoothing** — One Euro filter implementation for jitter-free cursor motion
+- **ClickSound** — Polyphonic click sound player with customizable sounds
+
+**Recording**
+- ScreenCaptureKit integration for screen capture
+- Multi-track recording: screen video, system audio, microphone, webcam
+- Real-time event logging via CGEvent tap
+- Sample buffer timing synchronization
+
+**Rendering**
+- Metal GPU pipeline with 4 specialized shaders
+- Background layer (solid colors, gradients, images)
+- Screen layer with rounded corners, shadows, zoom cropping
+- Cursor layer with texture rendering and hotspot positioning
+- Click highlight ripple effect animation
+
+**Export**
+- Full video/audio composition and muxing
+- Speed segment time-scaling with pitch preservation
+- Click sound integration from event log
+- H.264/HEVC codec support
+- Deterministic output (same input = same output)
+
+**App**
+- SwiftUI app with Library, Recording, and Editor views
+- Permission handling (screen recording, microphone)
+- Project lifecycle and state management
 - Dark theme pro-tool aesthetic
 
+**Editor**
+- 5-track timeline (Clip, Zoom, Speed, Cursor, Audio)
+- Drag-to-resize for all segment types with snap-to-grid
+- Context menus for segment actions (delete, reset, convert)
+- CursorOverride track for per-segment cursor visibility/scale
+- Numeric time input (TimeInput component) for precise editing
+- Keyboard shortcuts (see below)
+- ZoomTargetOverlay for visual zoom rect editing
+
+**Editor Keyboard Shortcuts**
+
+| Key | Action |
+|-----|--------|
+| `Space` | Play / Pause |
+| `J` | Skip backward |
+| `K` | Pause |
+| `L` | Skip forward |
+| `C` | Add cut at playhead |
+| `Z` | Add zoom segment at playhead |
+| `S` | Add speed segment at playhead |
+| `Delete` / `Backspace` | Delete selected segment |
+| `←` / `→` | Nudge selected segment by 1 frame |
+| `Shift + ←` / `→` | Nudge selected segment by 10 frames |
+
+**Testing**
+- Comprehensive test suite covering all core modules
+- Golden frame tests for rendering
+- Deterministic hash validation for export
+
+**CLI**
+- `validate` — Validate project packages
+- `package` — Create project packages
+- `export` — Export videos
+- `presets` — Show export presets
+
 ### What's next
-- Recording pipeline (ScreenCaptureKit integration)
-- ProjectModel implementation matching JSON schema
-- TimeMapper for source ↔ output time conversion
-- Metal rendering pipeline
-- Export engine
+- Webcam overlay positioning and compositing
+- Background image support in UI
+- Export progress UI and cancellation
+- App distribution and signing
 
 ## License
 

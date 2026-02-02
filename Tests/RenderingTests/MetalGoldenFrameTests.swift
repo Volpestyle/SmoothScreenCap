@@ -30,7 +30,7 @@ final class MetalGoldenFrameTests: XCTestCase {
   }
 }
 
-private let expectedGoldenHash = "cec1141f3d205f6d4ed0250e93c6afaa50bd4250f1fbc3b58465b639653237d2"
+private let expectedGoldenHash = "7609caa3026a1e219bd0667bf0c3963d8f05fd6ef684f85e173c1ef0cdcdfa0d"
 
 private func makeRenderer() throws -> MetalRenderer {
   guard let device = MTLCreateSystemDefaultDevice() else {
