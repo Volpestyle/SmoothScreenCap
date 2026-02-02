@@ -83,7 +83,7 @@ final class PreviewRenderer: ObservableObject {
             }
 
             // Create cursor texture (simple circle for now)
-            cursorTexture = try createCursorTexture()
+            cursorTexture = try CursorTextureFactory.makeCursorTexture(device: metalRenderer.device)
         } catch {
             self.error = error
         }
@@ -94,7 +94,9 @@ final class PreviewRenderer: ObservableObject {
     func renderFrame(
         at sourceTime: TimeInterval,
         background: Background,
-        outputSize: CGSize
+        outputSize: CGSize,
+        cursorSettings: CursorSettings? = nil,
+        cursorOverrides: [CursorOverride] = []
     ) async -> RenderFrame? {
         guard let frameReader = frameReader else { return nil }
 
@@ -115,25 +117,38 @@ final class PreviewRenderer: ObservableObject {
                 outputSize: outputSize
             )
 
-            // Build cursor layer if available
+            // Get effective cursor settings
+            let settings = cursorSettings ?? CursorSettings()
+
+            // Build cursor layer and click highlight if available
             var cursorLayer: CursorLayer?
+            var clickHighlight: ClickHighlight?
+
             if let interpolator = cursorInterpolator,
                let cursorTexture = cursorTexture {
-                let state = interpolator.cursorState(at: sourceTime)
+                let state = interpolator.cursorState(
+                    at: sourceTime,
+                    cursorSettings: settings,
+                    cursorOverrides: cursorOverrides
+                )
+
+                // Transform cursor position from source to screen coordinates
+                let sourceSize = frameReader.naturalSize
+                let screenFrame = screenLayer.frame
+
+                let scaleX = screenFrame.width / sourceSize.width
+                let scaleY = screenFrame.height / sourceSize.height
+
+                let screenX = screenFrame.minX + state.position.x * scaleX
+                let screenY = screenFrame.minY + state.position.y * scaleY
+                let screenPosition = CGPoint(x: screenX, y: screenY)
+
                 if state.isVisible {
-                    // Transform cursor position from source to screen coordinates
-                    let sourceSize = frameReader.naturalSize
-                    let screenFrame = screenLayer.frame
-
-                    let scaleX = screenFrame.width / sourceSize.width
-                    let scaleY = screenFrame.height / sourceSize.height
-
-                    let screenX = screenFrame.minX + state.position.x * scaleX
-                    let screenY = screenFrame.minY + state.position.y * scaleY
-
-                    // Cursor size and appearance
-                    let cursorSize = CGSize(width: 24, height: 24)
-                    let clickScale = state.isClicking ? 1.3 : 1.0
+                    // Cursor size with user scale setting
+                    let baseCursorSize: CGFloat = 24
+                    let userScale = CGFloat(settings.scale)
+                    let cursorSize = CGSize(width: baseCursorSize * userScale, height: baseCursorSize * userScale)
+                    let clickScale: CGFloat = state.isClicking ? 1.3 : 1.0
                     let scaledSize = CGSize(
                         width: cursorSize.width * clickScale,
                         height: cursorSize.height * clickScale
@@ -142,9 +157,31 @@ final class PreviewRenderer: ObservableObject {
                     cursorLayer = CursorLayer(
                         texture: cursorTexture,
                         size: scaledSize,
-                        position: CGPoint(x: screenX, y: screenY),
+                        position: screenPosition,
                         hotspot: CGPoint(x: scaledSize.width / 2, y: scaledSize.height / 2),
-                        opacity: state.isVisible ? 1.0 : 0.0
+                        opacity: Float(state.opacity)
+                    )
+                }
+
+                // Build click highlight if enabled and there's an active click
+                if settings.clickHighlightEnabled && state.clickProgress > 0 {
+                    let highlightColor = RenderColor(hex: settings.clickHighlightColor) ?? RenderColor(red: 1, green: 1, blue: 1, alpha: 1)
+                    let colorWithOpacity = RenderColor(
+                        red: highlightColor.red,
+                        green: highlightColor.green,
+                        blue: highlightColor.blue,
+                        alpha: Float(settings.clickHighlightOpacity)
+                    )
+
+                    // maxRadius scales with cursor size
+                    let maxRadius = CGFloat(40 * settings.scale)
+
+                    clickHighlight = ClickHighlight(
+                        position: screenPosition,
+                        progress: Float(1.0 - state.clickProgress), // Invert: clickProgress goes 1->0, we want 0->1
+                        color: colorWithOpacity,
+                        maxRadius: maxRadius,
+                        enabled: true
                     )
                 }
             }
@@ -153,7 +190,8 @@ final class PreviewRenderer: ObservableObject {
                 outputSize: outputSize,
                 background: renderBackground,
                 screen: screenLayer,
-                cursor: cursorLayer
+                cursor: cursorLayer,
+                clickHighlight: clickHighlight
             )
         } catch {
             print("Frame render error: \(error)")
@@ -161,64 +199,8 @@ final class PreviewRenderer: ObservableObject {
         }
     }
 
-    private func createCursorTexture() throws -> MTLTexture {
-        // Create a simple circle cursor texture
-        let size = 64
-        let textureDescriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm,
-            width: size,
-            height: size,
-            mipmapped: false
-        )
-        textureDescriptor.usage = [.shaderRead]
-
-        guard let texture = metalRenderer.device.makeTexture(descriptor: textureDescriptor) else {
-            throw PreviewRendererError.textureCreationFailed
-        }
-
-        // Draw a circle into the texture
-        var pixels = [UInt8](repeating: 0, count: size * size * 4)
-        let center = CGFloat(size) / 2
-        let radius = CGFloat(size) / 2 - 2
-
-        for y in 0..<size {
-            for x in 0..<size {
-                let dx = CGFloat(x) - center
-                let dy = CGFloat(y) - center
-                let distance = sqrt(dx * dx + dy * dy)
-
-                let index = (y * size + x) * 4
-                if distance <= radius {
-                    // White circle with soft edge
-                    let edgeSoftness: CGFloat = 2
-                    let alpha = min(1.0, (radius - distance) / edgeSoftness)
-
-                    // BGRA format
-                    pixels[index + 0] = 255  // B
-                    pixels[index + 1] = 255  // G
-                    pixels[index + 2] = 255  // R
-                    pixels[index + 3] = UInt8(alpha * 255)  // A
-                } else {
-                    // Transparent
-                    pixels[index + 0] = 0
-                    pixels[index + 1] = 0
-                    pixels[index + 2] = 0
-                    pixels[index + 3] = 0
-                }
-            }
-        }
-
-        texture.replace(
-            region: MTLRegionMake2D(0, 0, size, size),
-            mipmapLevel: 0,
-            withBytes: pixels,
-            bytesPerRow: size * 4
-        )
-
-        return texture
+    func clickTimes(between start: TimeInterval, end: TimeInterval) -> [TimeInterval] {
+        cursorInterpolator?.clickTimes(between: start, end: end) ?? []
     }
 
-    enum PreviewRendererError: Error {
-        case textureCreationFailed
-    }
 }
