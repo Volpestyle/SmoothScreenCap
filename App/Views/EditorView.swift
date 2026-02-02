@@ -5,16 +5,23 @@ import ProjectModel
 import TimeMapping
 import ExportEngine
 import Rendering
+import AutoZoom
 
 struct EditorView: View {
     @EnvironmentObject var appState: AppState
+    @State private var editingZoomIndex: Int?
+    @State private var selectedZoomIndexFromTimeline: Int?
+    @FocusState private var isFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
             // Main content area
             HStack(spacing: 0) {
                 // Preview area
-                PreviewPanel()
+                PreviewPanel(
+                    editingZoomIndex: $editingZoomIndex,
+                    selectedZoomIndex: selectedZoomIndexFromTimeline
+                )
                     .frame(maxWidth: .infinity)
 
                 // Right sidebar
@@ -23,16 +30,115 @@ struct EditorView: View {
             }
 
             // Timeline area
-            TimelinePanel()
+            TimelinePanel(
+                editingZoomIndex: $editingZoomIndex,
+                selectedZoomIndexBinding: $selectedZoomIndexFromTimeline
+            )
                 .frame(height: 220)
         }
         .background(Color(white: 0.04))
+        .focusable()
+        .focused($isFocused)
+        .onAppear { isFocused = true }
+        .onKeyPress { keyPress in
+            handleKeyPress(keyPress)
+        }
+    }
+
+    // MARK: - Keyboard Shortcuts
+
+    private func handleKeyPress(_ keyPress: KeyPress) -> KeyPress.Result {
+        // Space - Play/Pause
+        if keyPress.key == .space {
+            appState.togglePlayback()
+            return .handled
+        }
+
+        // J - Rewind (skip backward)
+        if keyPress.key == KeyEquivalent("j") {
+            appState.skipBackward()
+            return .handled
+        }
+
+        // K - Pause
+        if keyPress.key == KeyEquivalent("k") {
+            if appState.isPlaying {
+                appState.togglePlayback()
+            }
+            return .handled
+        }
+
+        // L - Forward (skip forward)
+        if keyPress.key == KeyEquivalent("l") {
+            appState.skipForward()
+            return .handled
+        }
+
+        // C - Add cut at playhead (already exists but adding here for completeness)
+        if keyPress.key == KeyEquivalent("c") && keyPress.modifiers.isEmpty {
+            addCutAtPlayhead()
+            return .handled
+        }
+
+        // Z - Add zoom at playhead
+        if keyPress.key == KeyEquivalent("z") && keyPress.modifiers.isEmpty {
+            addZoomAtPlayhead()
+            return .handled
+        }
+
+        // S - Add speed segment at playhead
+        if keyPress.key == KeyEquivalent("s") && keyPress.modifiers.isEmpty {
+            addSpeedAtPlayhead()
+            return .handled
+        }
+
+        return .ignored
+    }
+
+    // MARK: - Edit Actions (for keyboard shortcuts)
+
+    private func addCutAtPlayhead() {
+        guard let sourceTime = appState.currentSourceTime,
+              let duration = appState.currentProject?.assets.screen.duration else { return }
+        let cutStart = max(0, sourceTime)
+        let cutEnd = min(duration, sourceTime + 2.0)
+        appState.addCut(start: cutStart, end: cutEnd)
+    }
+
+    private func addZoomAtPlayhead() {
+        guard var project = appState.currentProject,
+              let sourceTime = appState.currentSourceTime,
+              let duration = project.assets.screen.duration else { return }
+
+        let zoomStart = max(0, sourceTime)
+        let zoomEnd = min(duration, sourceTime + 3.0)
+
+        let newSegment = ZoomSegment(
+            start: zoomStart,
+            end: zoomEnd,
+            mode: .manual,
+            scale: 2.0
+        )
+
+        project.edit.zoomSegments.append(newSegment)
+        project.edit.zoomSegments.sort { $0.start < $1.start }
+        appState.currentProject = project
+    }
+
+    private func addSpeedAtPlayhead() {
+        guard let sourceTime = appState.currentSourceTime,
+              let duration = appState.currentProject?.assets.screen.duration else { return }
+        let speedStart = max(0, sourceTime)
+        let speedEnd = min(duration, sourceTime + 3.0)
+        appState.addSpeedSegment(start: speedStart, end: speedEnd, rate: 2.0)
     }
 }
 
 struct PreviewPanel: View {
     @EnvironmentObject var appState: AppState
     @Environment(\.displayScale) private var displayScale
+    @Binding var editingZoomIndex: Int?
+    var selectedZoomIndex: Int?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -131,6 +237,17 @@ struct PreviewPanel: View {
                                 }
                                 Spacer()
                             }
+                        }
+
+                        // Zoom target editing overlay
+                        if let editingIndex = editingZoomIndex,
+                           editingIndex < appState.zoomSegments.count {
+                            ZoomTargetOverlay(
+                                zoomIndex: editingIndex,
+                                previewSize: previewSize,
+                                onDismiss: { editingZoomIndex = nil }
+                            )
+                            .environmentObject(appState)
                         }
                     } else {
                         VStack(spacing: 16) {
@@ -767,8 +884,15 @@ struct CursorTab: View {
 
     @State private var cursorStyle: Motion.Style = .mellow
     @State private var smoothingEnabled = true
+    @State private var smoothingMinCutoff: Double = 1.0
+    @State private var smoothingBeta: Double = 0.007
+    @State private var smoothingDCutoff: Double = 1.0
+    @State private var cursorScale: Double = 1.5
     @State private var hideWhenIdle = true
+    @State private var idleHideDelay: Double = 2.0
     @State private var clickHighlight = true
+    @State private var clickSoundEnabled = true
+    @State private var clickSoundVolume: Double = 0.6
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -806,6 +930,34 @@ struct CursorTab: View {
             Divider()
                 .background(Color.white.opacity(0.06))
 
+            // Cursor size slider
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("CURSOR SIZE")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("\(String(format: "%.1f", cursorScale))x")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+
+                Slider(value: $cursorScale, in: 0.5...3.0) { editing in
+                    updateCursorSettings()
+                    if !editing {
+                        saveCursorSettings()
+                    }
+                }
+                .tint(.white)
+
+                Text("Scale the cursor for better visibility")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+            }
+
+            Divider()
+                .background(Color.white.opacity(0.06))
+
             // Smoothing toggle
             Toggle(isOn: $smoothingEnabled) {
                 VStack(alignment: .leading, spacing: 2) {
@@ -818,35 +970,171 @@ struct CursorTab: View {
                 }
             }
             .toggleStyle(.switch)
+            .onChange(of: smoothingEnabled) { _, _ in
+                updateCursorSettings()
+                saveCursorSettings()
+            }
 
-            // Hide when idle
-            Toggle(isOn: $hideWhenIdle) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("HIDE WHEN IDLE")
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                    Text("Fade out after 2 seconds")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.tertiary)
+            if smoothingEnabled {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("MIN CUTOFF")
+                            .font(.system(size: 9, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                        Spacer()
+                        Text(String(format: "%.2f", smoothingMinCutoff))
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                    }
+
+                    Slider(value: $smoothingMinCutoff, in: 0.1...5.0) { editing in
+                        updateCursorSettings()
+                        if !editing { saveCursorSettings() }
+                    }
+                    .tint(.white.opacity(0.5))
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("BETA")
+                            .font(.system(size: 9, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                        Spacer()
+                        Text(String(format: "%.3f", smoothingBeta))
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                    }
+
+                    Slider(value: $smoothingBeta, in: 0.0...0.05) { editing in
+                        updateCursorSettings()
+                        if !editing { saveCursorSettings() }
+                    }
+                    .tint(.white.opacity(0.5))
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("D CUTOFF")
+                            .font(.system(size: 9, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                        Spacer()
+                        Text(String(format: "%.2f", smoothingDCutoff))
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                    }
+
+                    Slider(value: $smoothingDCutoff, in: 0.1...5.0) { editing in
+                        updateCursorSettings()
+                        if !editing { saveCursorSettings() }
+                    }
+                    .tint(.white.opacity(0.5))
                 }
             }
-            .toggleStyle(.switch)
 
             Divider()
                 .background(Color.white.opacity(0.06))
 
-            // Click effects
+            // Hide when idle toggle with delay slider
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle(isOn: $hideWhenIdle) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("HIDE WHEN IDLE")
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                        Text("Fade out cursor when not moving")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .toggleStyle(.switch)
+                .onChange(of: hideWhenIdle) { _, _ in
+                    updateCursorSettings()
+                    saveCursorSettings()
+                }
+
+                if hideWhenIdle {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("DELAY")
+                                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                            Spacer()
+                            Text("\(String(format: "%.1f", idleHideDelay))s")
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                        }
+
+                        Slider(value: $idleHideDelay, in: 0.5...5.0) { editing in
+                            updateCursorSettings()
+                            if !editing {
+                                saveCursorSettings()
+                            }
+                        }
+                        .tint(.white.opacity(0.5))
+                    }
+                }
+            }
+
+            Divider()
+                .background(Color.white.opacity(0.06))
+
+            // Click highlight toggle
             Toggle(isOn: $clickHighlight) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("CLICK HIGHLIGHT")
                         .font(.system(size: 10, weight: .semibold, design: .monospaced))
                         .foregroundStyle(.secondary)
-                    Text("Visual feedback on clicks")
+                    Text("Ripple effect on mouse clicks")
                         .font(.system(size: 9))
                         .foregroundStyle(.tertiary)
                 }
             }
             .toggleStyle(.switch)
+            .onChange(of: clickHighlight) { _, _ in
+                updateCursorSettings()
+                saveCursorSettings()
+            }
+
+            Divider()
+                .background(Color.white.opacity(0.06))
+
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle(isOn: $clickSoundEnabled) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("CLICK SOUND")
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                        Text("Subtle audio feedback on clicks")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .toggleStyle(.switch)
+                .onChange(of: clickSoundEnabled) { _, _ in
+                    updateCursorSettings()
+                    saveCursorSettings()
+                }
+
+                if clickSoundEnabled {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("VOLUME")
+                                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                            Spacer()
+                            Text("\(Int(clickSoundVolume * 100))%")
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                        }
+
+                        Slider(value: $clickSoundVolume, in: 0...1) { editing in
+                            updateCursorSettings()
+                            if !editing { saveCursorSettings() }
+                        }
+                        .tint(.white.opacity(0.5))
+                    }
+                }
+            }
         }
         .padding(16)
         .onAppear {
@@ -866,6 +1154,18 @@ struct CursorTab: View {
     private func loadFromProject() {
         guard let project = appState.currentProject else { return }
         cursorStyle = project.edit.motion.cursorStyle ?? .mellow
+
+        let settings = project.edit.cursorSettings ?? CursorSettings()
+        cursorScale = settings.scale
+        clickHighlight = settings.clickHighlightEnabled
+        hideWhenIdle = settings.idleHideEnabled
+        idleHideDelay = settings.idleHideDelay
+        smoothingEnabled = settings.smoothingEnabled
+        smoothingMinCutoff = settings.smoothingMinCutoff
+        smoothingBeta = settings.smoothingBeta
+        smoothingDCutoff = settings.smoothingDCutoff
+        clickSoundEnabled = settings.clickSoundEnabled
+        clickSoundVolume = settings.clickSoundVolume
     }
 
     private func updateMotion() {
@@ -877,15 +1177,79 @@ struct CursorTab: View {
         )
         appState.updateMotion(motion)
     }
+
+    private func updateCursorSettings() {
+        let settings = CursorSettings(
+            scale: cursorScale,
+            clickHighlightEnabled: clickHighlight,
+            clickHighlightColor: "#FFFFFF",
+            clickHighlightOpacity: 0.5,
+            clickSoundEnabled: clickSoundEnabled,
+            clickSoundVolume: clickSoundVolume,
+            idleHideEnabled: hideWhenIdle,
+            idleHideDelay: idleHideDelay,
+            smoothingEnabled: smoothingEnabled,
+            smoothingMinCutoff: smoothingMinCutoff,
+            smoothingBeta: smoothingBeta,
+            smoothingDCutoff: smoothingDCutoff
+        )
+        appState.updateCursorSettings(settings)
+
+        // Trigger live preview update
+        Task {
+            await appState.updatePreviewFrame()
+        }
+    }
+
+    private func saveCursorSettings() {
+        appState.saveCurrentProject()
+    }
 }
 
 struct ZoomTab: View {
     @EnvironmentObject var appState: AppState
     @State private var zoomLevel: Double = 2.0
     @State private var transitionDuration: Double = 0.4
+    @State private var autoZoomEnabled: Bool = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
+            // Auto-zoom toggle
+            Toggle(isOn: $autoZoomEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("AUTO-ZOOM FROM CLICKS")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    Text("Generate zoom from click events")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .toggleStyle(.switch)
+
+            if autoZoomEnabled {
+                Button {
+                    regenerateAutoZoom()
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .font(.system(size: 10))
+                        Text("REGENERATE")
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    }
+                    .foregroundStyle(.purple)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .frame(maxWidth: .infinity)
+                    .background(Color.purple.opacity(0.1))
+                    .cornerRadius(6)
+                }
+                .buttonStyle(.plain)
+            }
+
+            Divider()
+                .background(Color.white.opacity(0.06))
+
             // Zoom segments count
             HStack {
                 Text("ZOOM SEGMENTS")
@@ -904,6 +1268,11 @@ struct ZoomTab: View {
                             .environmentObject(appState)
                     }
                 }
+            } else {
+                Text("No zoom segments. Click ZOOM in timeline or regenerate.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .padding(.vertical, 8)
             }
 
             Divider()
@@ -942,12 +1311,49 @@ struct ZoomTab: View {
             Divider()
                 .background(Color.white.opacity(0.06))
 
-            Text("Edit zoom segments in the timeline below. Click and drag to reposition.")
+            Text("Click a segment to jump. Double-click in timeline to edit target.")
                 .font(.system(size: 11))
                 .foregroundStyle(.tertiary)
         }
         .padding(16)
     }
+
+    private func regenerateAutoZoom() {
+        guard let projectURL = appState.currentProjectURL,
+              let project = appState.currentProject else { return }
+
+        let eventsURL = projectURL.appendingPathComponent(project.assets.events.path)
+        do {
+            let data = try Data(contentsOf: eventsURL)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let eventLog = try decoder.decode(EventLogFileData.self, from: data)
+
+            let clicks: [AutoZoom.ClickEvent] = eventLog.mouseEvents.compactMap { event in
+                guard event.type == "mouseDown" && event.button == 0 else { return nil }
+                return AutoZoom.ClickEvent(
+                    time: event.time,
+                    location: AutoZoom.Point(x: event.x, y: event.y)
+                )
+            }
+
+            appState.generateAutoZoom(from: clicks)
+            appState.saveCurrentProject()
+        } catch {
+            print("Failed to load events for auto-zoom: \(error)")
+        }
+    }
+}
+
+private struct EventLogFileData: Codable {
+    struct MouseEventData: Codable {
+        let time: Double
+        let type: String
+        let x: Double
+        let y: Double
+        let button: Int
+    }
+    let mouseEvents: [MouseEventData]
 }
 
 struct ZoomSegmentRow: View {
@@ -955,12 +1361,25 @@ struct ZoomSegmentRow: View {
     let index: Int
     let segment: ZoomSegment
     @State private var isHovered = false
-    @State private var isEditing = false
+    @State private var isEditingScale = false
+    @State private var scaleText: String = ""
+    @FocusState private var isScaleFieldFocused: Bool
 
     var body: some View {
         HStack {
+            // Jump indicator
+            Button {
+                jumpToSegment()
+            } label: {
+                Image(systemName: "play.fill")
+                    .font(.system(size: 8))
+                    .foregroundStyle(.purple)
+            }
+            .buttonStyle(.plain)
+            .help("Jump to this segment")
+
             Circle()
-                .fill(Color.purple)
+                .fill(segment.mode == .manual ? Color.orange : Color.purple)
                 .frame(width: 8, height: 8)
 
             VStack(alignment: .leading, spacing: 2) {
@@ -968,14 +1387,21 @@ struct ZoomSegmentRow: View {
                     .font(.system(size: 10, weight: .medium, design: .monospaced))
                     .foregroundStyle(.white)
 
-                Text("\(String(format: "%.1f", segment.scale ?? 1.0))x • \(segment.mode.rawValue)")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 4) {
+                    Text("\(String(format: "%.1f", segment.scale ?? 1.0))x")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.purple)
+                    Text("•")
+                        .foregroundStyle(.secondary)
+                    Text(segment.mode == .manual ? "manual" : "auto")
+                        .font(.system(size: 9))
+                        .foregroundStyle(segment.mode == .manual ? .orange : .secondary)
+                }
             }
 
             Spacer()
 
-            if isHovered || isEditing {
+            if isHovered || isEditingScale {
                 HStack(spacing: 4) {
                     // Scale adjustment buttons
                     Button {
@@ -987,10 +1413,32 @@ struct ZoomSegmentRow: View {
                     }
                     .buttonStyle(.plain)
 
-                    Text("\(String(format: "%.1f", segment.scale ?? 1.0))x")
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(.purple)
-                        .frame(width: 30)
+                    // Numeric input for scale
+                    if isEditingScale {
+                        TextField("", text: $scaleText)
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(.purple)
+                            .frame(width: 36)
+                            .textFieldStyle(.plain)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 2)
+                            .background(Color.white.opacity(0.1))
+                            .cornerRadius(3)
+                            .focused($isScaleFieldFocused)
+                            .onSubmit {
+                                commitScaleEdit()
+                            }
+                    } else {
+                        Text("\(String(format: "%.1f", segment.scale ?? 1.0))x")
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(.purple)
+                            .frame(width: 36)
+                            .onTapGesture {
+                                scaleText = String(format: "%.1f", segment.scale ?? 1.0)
+                                isEditingScale = true
+                                isScaleFieldFocused = true
+                            }
+                    }
 
                     Button {
                         adjustScale(delta: 0.5)
@@ -1018,9 +1466,21 @@ struct ZoomSegmentRow: View {
         .padding(8)
         .background(Color.white.opacity(isHovered ? 0.06 : 0.03))
         .cornerRadius(6)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            jumpToSegment()
+        }
         .onHover { hovering in
             isHovered = hovering
+            if !hovering && isEditingScale {
+                commitScaleEdit()
+            }
         }
+    }
+
+    private func jumpToSegment() {
+        // Seek to the start of this zoom segment
+        appState.seek(to: segment.start)
     }
 
     private func adjustScale(delta: Double) {
@@ -1028,10 +1488,26 @@ struct ZoomSegmentRow: View {
               index < project.edit.zoomSegments.count else { return }
 
         let currentScale = project.edit.zoomSegments[index].scale ?? 1.0
-        let newScale = max(1.0, min(5.0, currentScale + delta))
+        let newScale = max(1.0, min(3.0, currentScale + delta))
         project.edit.zoomSegments[index].scale = newScale
         appState.currentProject = project
         appState.saveCurrentProject()
+    }
+
+    private func commitScaleEdit() {
+        guard var project = appState.currentProject,
+              index < project.edit.zoomSegments.count else {
+            isEditingScale = false
+            return
+        }
+
+        if let newScale = Double(scaleText) {
+            let clampedScale = max(1.0, min(3.0, newScale))
+            project.edit.zoomSegments[index].scale = clampedScale
+            appState.currentProject = project
+            appState.saveCurrentProject()
+        }
+        isEditingScale = false
     }
 
     private func deleteSegment() {
@@ -1296,6 +1772,30 @@ struct ExportTab: View {
                     .buttonStyle(.plain)
                     .disabled(selectedPreset == nil)
 
+                    Button {
+                        exportToClipboard()
+                    } label: {
+                        HStack {
+                            Image(systemName: "doc.on.clipboard")
+                            Text("COPY TO CLIPBOARD")
+                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        }
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color.white.opacity(0.1))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .strokeBorder(Color.white.opacity(0.1), lineWidth: 1)
+                                )
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(selectedPreset == nil)
+                    .keyboardShortcut("c", modifiers: [.command, .shift])
+
                     Text("Quick export saves to ~/Movies/")
                         .font(.system(size: 9))
                         .foregroundStyle(.tertiary)
@@ -1363,36 +1863,40 @@ struct ExportTab: View {
     }
 
     private func exportSuccessView(url: URL) -> some View {
-        VStack(spacing: 12) {
-            Image(systemName: "checkmark.circle.fill")
+        let isClipboard = appState.isClipboardExportSuccess
+
+        return VStack(spacing: 12) {
+            Image(systemName: isClipboard ? "doc.on.clipboard.fill" : "checkmark.circle.fill")
                 .font(.system(size: 32))
                 .foregroundStyle(.green)
 
-            Text("EXPORT COMPLETE")
+            Text(isClipboard ? "COPIED TO CLIPBOARD" : "EXPORT COMPLETE")
                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
                 .foregroundStyle(.green)
 
-            Text(url.lastPathComponent)
+            Text(isClipboard ? "Video ready to paste" : url.lastPathComponent)
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
 
             HStack(spacing: 12) {
-                Button {
-                    NSWorkspace.shared.selectFile(url.path, inFileViewerRootedAtPath: url.deletingLastPathComponent().path)
-                } label: {
-                    Text("REVEAL")
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 8)
-                        .background(
-                            RoundedRectangle(cornerRadius: 6)
-                                .fill(Color.white.opacity(0.1))
-                        )
+                if !isClipboard {
+                    Button {
+                        NSWorkspace.shared.selectFile(url.path, inFileViewerRootedAtPath: url.deletingLastPathComponent().path)
+                    } label: {
+                        Text("REVEAL")
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(Color.white.opacity(0.1))
+                            )
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
 
                 Button {
                     appState.clearExportState()
@@ -1470,6 +1974,11 @@ struct ExportTab: View {
         appState.exportToDefaultLocation(preset: preset)
     }
 
+    private func exportToClipboard() {
+        guard let preset = selectedPreset else { return }
+        appState.exportToClipboard(preset: preset)
+    }
+
     private func formatDuration(_ duration: TimeInterval) -> String {
         let minutes = Int(duration) / 60
         let seconds = Int(duration) % 60
@@ -1479,10 +1988,13 @@ struct ExportTab: View {
 
 struct TimelinePanel: View {
     @EnvironmentObject var appState: AppState
+    @Binding var editingZoomIndex: Int?
+    @Binding var selectedZoomIndexBinding: Int?
     @State private var isDraggingScrubber = false
     @State private var selectedClipIndex: Int?
     @State private var selectedZoomIndex: Int?
     @State private var selectedSpeedIndex: Int?
+    @State private var selectedCursorOverrideIndex: Int?
     @State private var snapEnabled = true
     @State private var showCutMenu = false
     @State private var cutMenuPosition: CGFloat = 0
@@ -1545,6 +2057,25 @@ struct TimelinePanel: View {
                 }
                 .buttonStyle(.plain)
                 .help("Add zoom segment (Z)")
+
+                // Add cursor override button
+                Button {
+                    addCursorOverrideAtPlayhead()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "cursorarrow")
+                            .font(.system(size: 10))
+                        Text("CURSOR")
+                            .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    }
+                    .foregroundStyle(.cyan)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.cyan.opacity(0.1))
+                    .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+                .help("Add cursor override segment")
 
                 // Snap toggle
                 Button {
@@ -1635,6 +2166,15 @@ struct TimelinePanel: View {
                                 },
                                 onDragEnded: {
                                     saveAfterDrag()
+                                },
+                                onDeleteSegment: { index in
+                                    cutClipSegment(at: index, duration: duration)
+                                },
+                                onRemoveAdjacentCut: { index in
+                                    removeAdjacentCut(forClipAt: index)
+                                },
+                                onChangeSpeed: { index, rate in
+                                    changeSpeedForClipSegment(index: index, rate: rate)
                                 }
                             )
 
@@ -1652,6 +2192,15 @@ struct TimelinePanel: View {
                                     selectedZoomIndex = selectedZoomIndex == index ? nil : index
                                     selectedClipIndex = nil
                                     selectedSpeedIndex = nil
+                                    selectedZoomIndexBinding = selectedZoomIndex
+                                },
+                                onSegmentDoubleClick: { index in
+                                    // Enter zoom target edit mode
+                                    editingZoomIndex = index
+                                },
+                                onSegmentContextMenu: { index in
+                                    selectedZoomIndex = index
+                                    selectedZoomIndexBinding = index
                                 },
                                 onAddSegment: { normalized in
                                     let time = normalized * duration
@@ -1665,6 +2214,12 @@ struct TimelinePanel: View {
                                 },
                                 onDragEnded: {
                                     saveAfterDrag()
+                                },
+                                onConvertToManual: { index in
+                                    convertZoomToManual(index: index)
+                                },
+                                onDeleteSegment: { index in
+                                    deleteZoomSegment(at: index)
                                 }
                             )
 
@@ -1695,6 +2250,46 @@ struct TimelinePanel: View {
                                 },
                                 onDragEnded: {
                                     saveAfterDrag()
+                                },
+                                onDeleteSegment: { index in
+                                    deleteSpeedSegment(at: index)
+                                },
+                                onResetSpeed: { index in
+                                    setSpeedRate(index: index, rate: 1.0)
+                                }
+                            )
+
+                            // Cursor override track (cyan)
+                            TimelineTrack(
+                                label: "CURSOR",
+                                color: .cyan,
+                                segments: buildCursorOverrideSegments(duration: duration, selectedIndex: selectedCursorOverrideIndex),
+                                trackWidth: trackWidth,
+                                trackType: .cursor,
+                                snapEnabled: snapEnabled,
+                                playheadPosition: playheadNormalized,
+                                allSegmentEdges: allEdges,
+                                onSegmentTap: { index in
+                                    selectedCursorOverrideIndex = selectedCursorOverrideIndex == index ? nil : index
+                                    selectedClipIndex = nil
+                                    selectedZoomIndex = nil
+                                    selectedSpeedIndex = nil
+                                },
+                                onAddSegment: { normalized in
+                                    let time = normalized * duration
+                                    addCursorOverrideAtTime(time)
+                                },
+                                onResizeStart: { index, newStart in
+                                    resizeCursorOverrideStart(index: index, newStart: newStart * duration)
+                                },
+                                onResizeEnd: { index, newEnd in
+                                    resizeCursorOverrideEnd(index: index, newEnd: newEnd * duration)
+                                },
+                                onDragEnded: {
+                                    saveAfterDrag()
+                                },
+                                onDeleteSegment: { index in
+                                    deleteCursorOverride(at: index)
                                 }
                             )
 
@@ -1768,14 +2363,124 @@ struct TimelinePanel: View {
             .background(Color(white: 0.04))
 
             // Selection info bar
-            if selectedClipIndex != nil || selectedZoomIndex != nil || selectedSpeedIndex != nil {
+            if selectedClipIndex != nil || selectedZoomIndex != nil || selectedSpeedIndex != nil || selectedCursorOverrideIndex != nil {
                 SelectionInfoBar(
                     selectedClipIndex: $selectedClipIndex,
                     selectedZoomIndex: $selectedZoomIndex,
-                    selectedSpeedIndex: $selectedSpeedIndex
+                    selectedSpeedIndex: $selectedSpeedIndex,
+                    selectedCursorOverrideIndex: $selectedCursorOverrideIndex
                 )
             }
         }
+        .focusable()
+        .onKeyPress { keyPress in
+            handleTimelineKeyPress(keyPress)
+        }
+    }
+
+    // MARK: - Timeline Keyboard Shortcuts
+
+    private func handleTimelineKeyPress(_ keyPress: KeyPress) -> KeyPress.Result {
+        let frameTime = 1.0 / 30.0 // Assuming 30fps
+
+        // Delete/Backspace - Delete selected segment
+        if keyPress.key == .delete || keyPress.key == KeyEquivalent("\u{7F}") {
+            return deleteSelectedSegment()
+        }
+
+        // Arrow keys - Nudge segment
+        let nudgeFrames = keyPress.modifiers.contains(.shift) ? 10 : 1
+        let nudgeAmount = frameTime * Double(nudgeFrames)
+
+        if keyPress.key == .leftArrow {
+            return nudgeSelectedSegment(by: -nudgeAmount)
+        }
+
+        if keyPress.key == .rightArrow {
+            return nudgeSelectedSegment(by: nudgeAmount)
+        }
+
+        // S - Add speed segment at playhead
+        if keyPress.key == KeyEquivalent("s") && keyPress.modifiers.isEmpty {
+            guard let sourceTime = appState.currentSourceTime else { return .ignored }
+            addSpeedAtTime(sourceTime)
+            return .handled
+        }
+
+        return .ignored
+    }
+
+    private func deleteSelectedSegment() -> KeyPress.Result {
+        guard var project = appState.currentProject else { return .ignored }
+
+        if let zoomIndex = selectedZoomIndex, zoomIndex < project.edit.zoomSegments.count {
+            project.edit.zoomSegments.remove(at: zoomIndex)
+            appState.currentProject = project
+            selectedZoomIndex = nil
+            selectedZoomIndexBinding = nil
+            appState.saveCurrentProject()
+            return .handled
+        }
+
+        if let speedIndex = selectedSpeedIndex, speedIndex < project.edit.speedSegments.count {
+            project.edit.speedSegments.remove(at: speedIndex)
+            appState.currentProject = project
+            selectedSpeedIndex = nil
+            appState.saveCurrentProject()
+            appState.rebuildTimeMapper()
+            return .handled
+        }
+
+        if let cursorIndex = selectedCursorOverrideIndex, cursorIndex < project.edit.cursorOverrides.count {
+            project.edit.cursorOverrides.remove(at: cursorIndex)
+            appState.currentProject = project
+            selectedCursorOverrideIndex = nil
+            appState.saveCurrentProject()
+            return .handled
+        }
+
+        return .ignored
+    }
+
+    private func nudgeSelectedSegment(by amount: Double) -> KeyPress.Result {
+        guard var project = appState.currentProject,
+              let duration = project.assets.screen.duration else { return .ignored }
+
+        if let zoomIndex = selectedZoomIndex, zoomIndex < project.edit.zoomSegments.count {
+            var segment = project.edit.zoomSegments[zoomIndex]
+            let segmentDuration = segment.end - segment.start
+            segment.start = max(0, min(segment.start + amount, duration - segmentDuration))
+            segment.end = segment.start + segmentDuration
+            project.edit.zoomSegments[zoomIndex] = segment
+            appState.currentProject = project
+            appState.saveCurrentProject()
+            return .handled
+        }
+
+        if let speedIndex = selectedSpeedIndex, speedIndex < project.edit.speedSegments.count {
+            var segment = project.edit.speedSegments[speedIndex]
+            let segmentDuration = segment.end - segment.start
+            segment.start = max(0, min(segment.start + amount, duration - segmentDuration))
+            segment.end = segment.start + segmentDuration
+            project.edit.speedSegments[speedIndex] = segment
+            appState.currentProject = project
+            appState.rebuildTimeMapper()
+            appState.saveCurrentProject()
+            return .handled
+        }
+
+        if let cursorIndex = selectedCursorOverrideIndex, cursorIndex < project.edit.cursorOverrides.count {
+            var override = project.edit.cursorOverrides[cursorIndex]
+            let segmentDuration = override.end - override.start
+            override.start = max(0, min(override.start + amount, duration - segmentDuration))
+            override.end = override.start + segmentDuration
+            project.edit.cursorOverrides[cursorIndex] = override
+            appState.currentProject = project
+            appState.saveCurrentProject()
+            return .handled
+        }
+
+        return .ignored
     }
 
     // MARK: - Segment Building
@@ -1839,6 +2544,27 @@ struct TimelinePanel: View {
         }
     }
 
+    private func buildCursorOverrideSegments(duration: Double, selectedIndex: Int?) -> [TimelineSegment] {
+        return appState.cursorOverrides.enumerated().map { index, override in
+            let label: String
+            if override.hideCursor == true {
+                label = "HIDE"
+            } else if override.disableSmoothing == true {
+                label = "RAW"
+            } else if let scale = override.cursorScale {
+                label = "\(String(format: "%.1f", scale))x"
+            } else {
+                label = "MOD"
+            }
+            return TimelineSegment(
+                start: override.start / duration,
+                end: override.end / duration,
+                label: label,
+                isSelected: index == selectedIndex
+            )
+        }
+    }
+
     // MARK: - Edit Actions
 
     private func addCutAtPlayhead() {
@@ -1885,6 +2611,191 @@ struct TimelinePanel: View {
         appState.addSpeedSegment(start: speedStart, end: speedEnd, rate: 2.0)
     }
 
+    private func addCursorOverrideAtPlayhead() {
+        guard let sourceTime = appState.currentSourceTime else { return }
+        addCursorOverrideAtTime(sourceTime)
+    }
+
+    private func addCursorOverrideAtTime(_ time: Double) {
+        guard var project = appState.currentProject,
+              let duration = project.assets.screen.duration else { return }
+
+        let start = max(0, time)
+        let end = min(duration, time + 3.0)
+
+        let newOverride = CursorOverride(
+            start: start,
+            end: end,
+            hideCursor: false,
+            disableSmoothing: false,
+            cursorScale: nil
+        )
+
+        project.edit.cursorOverrides.append(newOverride)
+        project.edit.cursorOverrides.sort { $0.start < $1.start }
+        appState.currentProject = project
+        appState.saveCurrentProject()
+    }
+
+    private func cutClipSegment(at index: Int, duration: Double) {
+        guard let range = clipRange(for: index, duration: duration) else { return }
+        appState.addCut(start: range.start, end: range.end)
+        appState.saveCurrentProject()
+        Task {
+            await appState.updatePreviewFrame()
+        }
+    }
+
+    private func removeAdjacentCut(forClipAt index: Int) {
+        guard var project = appState.currentProject else { return }
+        let cuts = project.edit.cuts.sorted { $0.start < $1.start }
+        guard !cuts.isEmpty else { return }
+
+        let cutIndex: Int
+        if index == 0 {
+            cutIndex = 0
+        } else if index <= cuts.count {
+            cutIndex = min(index - 1, cuts.count - 1)
+        } else {
+            return
+        }
+
+        guard cutIndex >= 0, cutIndex < project.edit.cuts.count else { return }
+        project.edit.cuts.remove(at: cutIndex)
+        appState.currentProject = project
+        appState.rebuildTimeMapper()
+        appState.saveCurrentProject()
+
+        Task {
+            await appState.updatePreviewFrame()
+        }
+    }
+
+    private func deleteSpeedSegment(at index: Int) {
+        guard var project = appState.currentProject,
+              index < project.edit.speedSegments.count else { return }
+        project.edit.speedSegments.remove(at: index)
+        appState.currentProject = project
+        selectedSpeedIndex = nil
+        appState.rebuildTimeMapper()
+        appState.saveCurrentProject()
+
+        Task {
+            await appState.updatePreviewFrame()
+        }
+    }
+
+    private func setSpeedRate(index: Int, rate: Double) {
+        guard var project = appState.currentProject,
+              index < project.edit.speedSegments.count else { return }
+        project.edit.speedSegments[index].rate = max(0.1, rate)
+        appState.currentProject = project
+        appState.rebuildTimeMapper()
+        appState.saveCurrentProject()
+
+        Task {
+            await appState.updatePreviewFrame()
+        }
+    }
+
+    private func changeSpeedForClipSegment(index: Int, rate: Double) {
+        guard var project = appState.currentProject,
+              let duration = project.assets.screen.duration else { return }
+
+        let cuts = project.edit.cuts.sorted { $0.start < $1.start }
+        let clipRange: (start: Double, end: Double)
+
+        if cuts.isEmpty {
+            clipRange = (start: 0, end: duration)
+        } else if index == 0 {
+            clipRange = (start: 0, end: cuts[0].start)
+        } else if index < cuts.count {
+            clipRange = (start: cuts[index - 1].end, end: cuts[index].start)
+        } else if index == cuts.count {
+            clipRange = (start: cuts[cuts.count - 1].end, end: duration)
+        } else {
+            return
+        }
+
+        let start = max(0, min(duration, clipRange.start))
+        let end = max(0, min(duration, clipRange.end))
+        guard end > start else { return }
+
+        let clampedRate = max(0.1, rate)
+        var updatedSegments: [SpeedSegment] = []
+
+        for segment in project.edit.speedSegments {
+            if segment.end <= start || segment.start >= end {
+                updatedSegments.append(segment)
+                continue
+            }
+
+            if segment.start < start && segment.end > end {
+                updatedSegments.append(SpeedSegment(start: segment.start, end: start, rate: segment.rate))
+                updatedSegments.append(SpeedSegment(start: end, end: segment.end, rate: segment.rate))
+                continue
+            }
+
+            if segment.start < start && segment.end > start {
+                updatedSegments.append(SpeedSegment(start: segment.start, end: start, rate: segment.rate))
+                continue
+            }
+
+            if segment.start < end && segment.end > end {
+                updatedSegments.append(SpeedSegment(start: end, end: segment.end, rate: segment.rate))
+                continue
+            }
+        }
+
+        if abs(clampedRate - 1.0) > 0.001 {
+            updatedSegments.append(SpeedSegment(start: start, end: end, rate: clampedRate))
+        }
+
+        updatedSegments.sort { $0.start < $1.start }
+        project.edit.speedSegments = updatedSegments
+        appState.currentProject = project
+        appState.rebuildTimeMapper()
+        appState.saveCurrentProject()
+
+        Task {
+            await appState.updatePreviewFrame()
+        }
+    }
+
+    private func clipRange(for index: Int, duration: Double) -> (start: Double, end: Double)? {
+        guard duration > 0 else { return nil }
+        guard let project = appState.currentProject else { return nil }
+        let cuts = project.edit.cuts.sorted { $0.start < $1.start }
+
+        if cuts.isEmpty {
+            return (start: 0, end: duration)
+        }
+
+        if index == 0 {
+            return (start: 0, end: cuts[0].start)
+        }
+
+        if index < cuts.count {
+            return (start: cuts[index - 1].end, end: cuts[index].start)
+        }
+
+        if index == cuts.count {
+            return (start: cuts[cuts.count - 1].end, end: duration)
+        }
+
+        return nil
+    }
+
+    private func deleteCursorOverride(at index: Int) {
+        guard var project = appState.currentProject,
+              index < project.edit.cursorOverrides.count else { return }
+
+        project.edit.cursorOverrides.remove(at: index)
+        appState.currentProject = project
+        selectedCursorOverrideIndex = nil
+        appState.saveCurrentProject()
+    }
+
     // MARK: - Segment Edge Collection for Snapping
 
     private func collectAllSegmentEdges(duration: Double) -> [CGFloat] {
@@ -1909,21 +2820,90 @@ struct TimelinePanel: View {
             edges.append(segment.end / duration)
         }
 
+        // Collect from cursor overrides
+        for override in appState.cursorOverrides {
+            edges.append(override.start / duration)
+            edges.append(override.end / duration)
+        }
+
         return edges
     }
 
     // MARK: - Clip Segment Resizing
+    //
+    // Clip segments are the INVERSE of cuts - they show kept portions.
+    // The timeline displays clip segments as gaps between cuts:
+    //   - Clip 0: from 0 to cuts[0].start
+    //   - Clip 1: from cuts[0].end to cuts[1].start
+    //   - Clip N: from cuts[N-1].end to cuts[N].start (or duration if last)
+    //
+    // Resizing a clip edge means adjusting the adjacent cut boundary.
 
     private func resizeClipSegmentStart(index: Int, newStart: Double) {
-        // Clip segments are derived from cuts - resizing a clip means adjusting adjacent cuts
-        // For now, this is a no-op as clips are computed from cuts
-        // TODO: Implement inverse mapping from clip to cut
+        guard var project = appState.currentProject else { return }
+        let cuts = project.edit.cuts.sorted { $0.start < $1.start }
+
+        // Clip segment index maps to cut boundaries:
+        // - Clip 0 starts at 0 (no cut before it to adjust) OR at previous cut's end
+        // - Clip N starts at cuts[N-1].end
+
+        if index == 0 {
+            // First clip starts at 0 - dragging left edge would need to create a cut at start
+            // For now, we don't allow this (clip 0 always starts at 0)
+            return
+        }
+
+        // For clip index > 0, we adjust the END of cut[index-1]
+        let cutIndex = index - 1
+        guard cutIndex >= 0, cutIndex < cuts.count else { return }
+
+        let minCutDuration = 0.1
+        let cutStart = cuts[cutIndex].start
+        // newStart is where the clip should start, which means the cut should END at newStart
+        let clampedEnd = max(cutStart + minCutDuration, newStart)
+
+        project.edit.cuts[cutIndex].end = clampedEnd
+        project.edit.cuts.sort { $0.start < $1.start }
+        appState.currentProject = project
+        appState.rebuildTimeMapper()
+
+        Task {
+            await appState.updatePreviewFrame()
+        }
     }
 
     private func resizeClipSegmentEnd(index: Int, newEnd: Double) {
-        // Clip segments are derived from cuts - resizing a clip means adjusting adjacent cuts
-        // For now, this is a no-op as clips are computed from cuts
-        // TODO: Implement inverse mapping from clip to cut
+        guard var project = appState.currentProject,
+              let duration = project.assets.screen.duration else { return }
+        let cuts = project.edit.cuts.sorted { $0.start < $1.start }
+
+        // Clip segment index maps to cut boundaries:
+        // - Clip N ends at cuts[N].start (if there's a cut after it)
+        // - Last clip ends at duration (no cut after it to adjust)
+
+        if index >= cuts.count {
+            // Last clip ends at duration - dragging right edge would need to create a cut at end
+            // For now, we don't allow this (last clip always ends at duration)
+            return
+        }
+
+        // For clip index < cuts.count, we adjust the START of cut[index]
+        let cutIndex = index
+        guard cutIndex >= 0, cutIndex < cuts.count else { return }
+
+        let minCutDuration = 0.1
+        let cutEnd = cuts[cutIndex].end
+        // newEnd is where the clip should end, which means the cut should START at newEnd
+        let clampedStart = max(0, min(newEnd, cutEnd - minCutDuration))
+
+        project.edit.cuts[cutIndex].start = clampedStart
+        project.edit.cuts.sort { $0.start < $1.start }
+        appState.currentProject = project
+        appState.rebuildTimeMapper()
+
+        Task {
+            await appState.updatePreviewFrame()
+        }
     }
 
     // MARK: - Zoom Segment Resizing
@@ -1977,6 +2957,11 @@ struct TimelinePanel: View {
 
         project.edit.speedSegments[index].start = clampedStart
         appState.currentProject = project
+        appState.rebuildTimeMapper()
+
+        Task {
+            await appState.updatePreviewFrame()
+        }
     }
 
     private func resizeSpeedSegmentEnd(index: Int, newEnd: Double) {
@@ -1990,11 +2975,73 @@ struct TimelinePanel: View {
 
         project.edit.speedSegments[index].end = clampedEnd
         appState.currentProject = project
+        appState.rebuildTimeMapper()
+
+        Task {
+            await appState.updatePreviewFrame()
+        }
+    }
+
+    // MARK: - Cursor Override Resizing
+
+    private func resizeCursorOverrideStart(index: Int, newStart: Double) {
+        guard var project = appState.currentProject,
+              index < project.edit.cursorOverrides.count else { return }
+
+        let minDuration = 0.1
+        let currentEnd = project.edit.cursorOverrides[index].end
+        let clampedStart = max(0, min(newStart, currentEnd - minDuration))
+
+        project.edit.cursorOverrides[index].start = clampedStart
+        appState.currentProject = project
+
+        Task {
+            await appState.updatePreviewFrame()
+        }
+    }
+
+    private func resizeCursorOverrideEnd(index: Int, newEnd: Double) {
+        guard var project = appState.currentProject,
+              index < project.edit.cursorOverrides.count,
+              let duration = project.assets.screen.duration else { return }
+
+        let minDuration = 0.1
+        let currentStart = project.edit.cursorOverrides[index].start
+        let clampedEnd = max(currentStart + minDuration, min(newEnd, duration))
+
+        project.edit.cursorOverrides[index].end = clampedEnd
+        appState.currentProject = project
+
+        Task {
+            await appState.updatePreviewFrame()
+        }
     }
 
     // MARK: - Save After Drag
 
     private func saveAfterDrag() {
+        appState.saveCurrentProject()
+    }
+
+    // MARK: - Zoom Segment Actions
+
+    private func convertZoomToManual(index: Int) {
+        guard var project = appState.currentProject,
+              index < project.edit.zoomSegments.count else { return }
+
+        project.edit.zoomSegments[index].mode = .manual
+        appState.currentProject = project
+        appState.saveCurrentProject()
+    }
+
+    private func deleteZoomSegment(at index: Int) {
+        guard var project = appState.currentProject,
+              index < project.edit.zoomSegments.count else { return }
+
+        project.edit.zoomSegments.remove(at: index)
+        appState.currentProject = project
+        selectedZoomIndex = nil
+        selectedZoomIndexBinding = nil
         appState.saveCurrentProject()
     }
 
@@ -2012,166 +3059,43 @@ struct SelectionInfoBar: View {
     @Binding var selectedClipIndex: Int?
     @Binding var selectedZoomIndex: Int?
     @Binding var selectedSpeedIndex: Int?
+    @Binding var selectedCursorOverrideIndex: Int?
+
+    private var sourceDuration: Double {
+        appState.currentProject?.assets.screen.duration ?? 1.0
+    }
 
     var body: some View {
         HStack(spacing: 16) {
             if let zoomIndex = selectedZoomIndex,
                zoomIndex < appState.zoomSegments.count {
-                let segment = appState.zoomSegments[zoomIndex]
-
-                HStack(spacing: 8) {
-                    Circle()
-                        .fill(Color.purple)
-                        .frame(width: 8, height: 8)
-
-                    Text("ZOOM \(zoomIndex + 1)")
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.purple)
-
-                    Text("\(formatTime(segment.start)) - \(formatTime(segment.end))")
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.secondary)
-
-                    Divider()
-                        .frame(height: 16)
-
-                    // Scale stepper
-                    HStack(spacing: 4) {
-                        Text("SCALE")
-                            .font(.system(size: 9, weight: .medium, design: .monospaced))
-                            .foregroundStyle(.secondary)
-
-                        Button {
-                            adjustZoomScale(index: zoomIndex, delta: -0.5)
-                        } label: {
-                            Image(systemName: "minus")
-                                .font(.system(size: 10))
-                        }
-                        .buttonStyle(.plain)
-
-                        Text("\(String(format: "%.1f", segment.scale ?? 1.0))x")
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
-                            .foregroundStyle(.white)
-                            .frame(width: 36)
-
-                        Button {
-                            adjustZoomScale(index: zoomIndex, delta: 0.5)
-                        } label: {
-                            Image(systemName: "plus")
-                                .font(.system(size: 10))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-
-                Spacer()
-
-                Button {
-                    deleteZoomSegment(at: zoomIndex)
-                } label: {
-                    Image(systemName: "trash")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.red)
-                }
-                .buttonStyle(.plain)
+                ZoomSelectionInfo(
+                    zoomIndex: zoomIndex,
+                    sourceDuration: sourceDuration,
+                    onDelete: { deleteZoomSegment(at: zoomIndex) }
+                )
 
             } else if let speedIndex = selectedSpeedIndex,
                       speedIndex < appState.speedSegments.count {
-                let segment = appState.speedSegments[speedIndex]
+                SpeedSelectionInfo(
+                    speedIndex: speedIndex,
+                    sourceDuration: sourceDuration,
+                    onDelete: { deleteSpeedSegment(at: speedIndex) }
+                )
 
-                HStack(spacing: 8) {
-                    Circle()
-                        .fill(Color.orange)
-                        .frame(width: 8, height: 8)
-
-                    Text("SPEED \(speedIndex + 1)")
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.orange)
-
-                    Text("\(formatTime(segment.start)) - \(formatTime(segment.end))")
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.secondary)
-
-                    Divider()
-                        .frame(height: 16)
-
-                    // Quick rate presets
-                    HStack(spacing: 4) {
-                        ForEach([0.5, 1.0, 1.5, 2.0], id: \.self) { rate in
-                            Button {
-                                setSpeedRate(index: speedIndex, rate: rate)
-                            } label: {
-                                Text("\(String(format: "%.1f", rate))x")
-                                    .font(.system(size: 9, weight: .medium, design: .monospaced))
-                                    .foregroundStyle(abs(segment.rate - rate) < 0.01 ? .white : .secondary)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 3)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 4)
-                                            .fill(abs(segment.rate - rate) < 0.01 ? Color.orange.opacity(0.3) : Color.white.opacity(0.05))
-                                    )
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-
-                    Divider()
-                        .frame(height: 16)
-
-                    // Rate fine-tune stepper
-                    HStack(spacing: 4) {
-                        Button {
-                            adjustSpeedRate(index: speedIndex, delta: -0.25)
-                        } label: {
-                            Image(systemName: "minus")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-
-                        Text("\(String(format: "%.2f", segment.rate))x")
-                            .font(.system(size: 10, weight: .medium, design: .monospaced))
-                            .foregroundStyle(.white)
-                            .frame(width: 40)
-
-                        Button {
-                            adjustSpeedRate(index: speedIndex, delta: 0.25)
-                        } label: {
-                            Image(systemName: "plus")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-
-                Spacer()
-
-                Button {
-                    deleteSpeedSegment(at: speedIndex)
-                } label: {
-                    Image(systemName: "trash")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.red)
-                }
-                .buttonStyle(.plain)
+            } else if let cursorIndex = selectedCursorOverrideIndex,
+                      cursorIndex < appState.cursorOverrides.count {
+                CursorOverrideSelectionInfo(
+                    cursorIndex: cursorIndex,
+                    sourceDuration: sourceDuration,
+                    onDelete: { deleteCursorOverride(at: cursorIndex) }
+                )
 
             } else if let clipIndex = selectedClipIndex {
-                HStack(spacing: 8) {
-                    Circle()
-                        .fill(Color.yellow)
-                        .frame(width: 8, height: 8)
-
-                    Text("CLIP \(clipIndex + 1)")
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.yellow)
-
-                    Text("Select a cut region to delete it")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer()
+                ClipSelectionInfo(
+                    clipIndex: clipIndex,
+                    sourceDuration: sourceDuration
+                )
             }
         }
         .padding(.horizontal, 16)
@@ -2179,59 +3103,484 @@ struct SelectionInfoBar: View {
         .background(Color(white: 0.08))
     }
 
-    private func formatTime(_ time: Double) -> String {
-        let minutes = Int(time) / 60
-        let seconds = Int(time) % 60
-        return String(format: "%d:%02d", minutes, seconds)
-    }
-
-    private func adjustZoomScale(index: Int, delta: Double) {
-        guard var project = appState.currentProject,
-              index < project.edit.zoomSegments.count else { return }
-
-        let currentScale = project.edit.zoomSegments[index].scale ?? 1.0
-        let newScale = max(1.0, min(5.0, currentScale + delta))
-        project.edit.zoomSegments[index].scale = newScale
-        appState.currentProject = project
-    }
-
     private func deleteZoomSegment(at index: Int) {
         guard var project = appState.currentProject,
               index < project.edit.zoomSegments.count else { return }
-
         project.edit.zoomSegments.remove(at: index)
         appState.currentProject = project
         selectedZoomIndex = nil
-    }
-
-    private func adjustSpeedRate(index: Int, delta: Double) {
-        guard var project = appState.currentProject,
-              index < project.edit.speedSegments.count else { return }
-
-        let currentRate = project.edit.speedSegments[index].rate
-        let newRate = max(0.25, min(4.0, currentRate + delta))
-        project.edit.speedSegments[index].rate = newRate
-        appState.currentProject = project
-        appState.saveCurrentProject()
-    }
-
-    private func setSpeedRate(index: Int, rate: Double) {
-        guard var project = appState.currentProject,
-              index < project.edit.speedSegments.count else { return }
-
-        let newRate = max(0.25, min(4.0, rate))
-        project.edit.speedSegments[index].rate = newRate
-        appState.currentProject = project
         appState.saveCurrentProject()
     }
 
     private func deleteSpeedSegment(at index: Int) {
         guard var project = appState.currentProject,
               index < project.edit.speedSegments.count else { return }
-
         project.edit.speedSegments.remove(at: index)
         appState.currentProject = project
         selectedSpeedIndex = nil
+        appState.saveCurrentProject()
+    }
+
+    private func deleteCursorOverride(at index: Int) {
+        guard var project = appState.currentProject,
+              index < project.edit.cursorOverrides.count else { return }
+        project.edit.cursorOverrides.remove(at: index)
+        appState.currentProject = project
+        selectedCursorOverrideIndex = nil
+        appState.saveCurrentProject()
+    }
+}
+
+// MARK: - Zoom Selection Info
+
+struct ZoomSelectionInfo: View {
+    @EnvironmentObject var appState: AppState
+    let zoomIndex: Int
+    let sourceDuration: Double
+    let onDelete: () -> Void
+
+    private var segment: ZoomSegment {
+        appState.zoomSegments[zoomIndex]
+    }
+
+    private var startTime: Binding<Double> {
+        Binding(
+            get: { segment.start },
+            set: { newValue in updateZoomStart(newValue) }
+        )
+    }
+
+    private var endTime: Binding<Double> {
+        Binding(
+            get: { segment.end },
+            set: { newValue in updateZoomEnd(newValue) }
+        )
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(Color.purple)
+                .frame(width: 8, height: 8)
+
+            Text("ZOOM \(zoomIndex + 1)")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.purple)
+
+            Divider()
+                .frame(height: 16)
+
+            // Editable start/end times
+            TimeInput(seconds: startTime, label: "START", sourceDuration: sourceDuration)
+            TimeInput(seconds: endTime, label: "END", sourceDuration: sourceDuration)
+
+            // Duration (read-only)
+            Text("(\(formatDuration(segment.end - segment.start)))")
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(.tertiary)
+
+            Divider()
+                .frame(height: 16)
+
+            // Scale stepper
+            HStack(spacing: 4) {
+                Text("SCALE")
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+
+                Button { adjustZoomScale(delta: -0.5) } label: {
+                    Image(systemName: "minus").font(.system(size: 10))
+                }
+                .buttonStyle(.plain)
+
+                Text("\(String(format: "%.1f", segment.scale ?? 1.0))x")
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.white)
+                    .frame(width: 36)
+
+                Button { adjustZoomScale(delta: 0.5) } label: {
+                    Image(systemName: "plus").font(.system(size: 10))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+
+        Spacer()
+
+        Button(action: onDelete) {
+            Image(systemName: "trash")
+                .font(.system(size: 11))
+                .foregroundStyle(.red)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func formatDuration(_ duration: Double) -> String {
+        String(format: "%.1fs", duration)
+    }
+
+    private func updateZoomStart(_ newStart: Double) {
+        guard var project = appState.currentProject,
+              zoomIndex < project.edit.zoomSegments.count else { return }
+        let minDuration = 0.1
+        let clamped = max(0, min(newStart, segment.end - minDuration))
+        project.edit.zoomSegments[zoomIndex].start = clamped
+        appState.currentProject = project
+        appState.saveCurrentProject()
+    }
+
+    private func updateZoomEnd(_ newEnd: Double) {
+        guard var project = appState.currentProject,
+              zoomIndex < project.edit.zoomSegments.count else { return }
+        let minDuration = 0.1
+        let clamped = max(segment.start + minDuration, min(newEnd, sourceDuration))
+        project.edit.zoomSegments[zoomIndex].end = clamped
+        appState.currentProject = project
+        appState.saveCurrentProject()
+    }
+
+    private func adjustZoomScale(delta: Double) {
+        guard var project = appState.currentProject,
+              zoomIndex < project.edit.zoomSegments.count else { return }
+        let currentScale = project.edit.zoomSegments[zoomIndex].scale ?? 1.0
+        let newScale = max(1.0, min(5.0, currentScale + delta))
+        project.edit.zoomSegments[zoomIndex].scale = newScale
+        appState.currentProject = project
+        appState.saveCurrentProject()
+    }
+}
+
+// MARK: - Speed Selection Info
+
+struct SpeedSelectionInfo: View {
+    @EnvironmentObject var appState: AppState
+    let speedIndex: Int
+    let sourceDuration: Double
+    let onDelete: () -> Void
+
+    private var segment: SpeedSegment {
+        appState.speedSegments[speedIndex]
+    }
+
+    private var startTime: Binding<Double> {
+        Binding(
+            get: { segment.start },
+            set: { newValue in updateSpeedStart(newValue) }
+        )
+    }
+
+    private var endTime: Binding<Double> {
+        Binding(
+            get: { segment.end },
+            set: { newValue in updateSpeedEnd(newValue) }
+        )
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(Color.orange)
+                .frame(width: 8, height: 8)
+
+            Text("SPEED \(speedIndex + 1)")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.orange)
+
+            Divider()
+                .frame(height: 16)
+
+            TimeInput(seconds: startTime, label: "START", sourceDuration: sourceDuration)
+            TimeInput(seconds: endTime, label: "END", sourceDuration: sourceDuration)
+
+            Text("(\(formatDuration((segment.end - segment.start) / segment.rate)))")
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(.tertiary)
+
+            Divider()
+                .frame(height: 16)
+
+            HStack(spacing: 4) {
+                ForEach([0.5, 1.0, 1.5, 2.0], id: \.self) { rate in
+                    Button { setSpeedRate(rate: rate) } label: {
+                        Text("\(String(format: "%.1f", rate))x")
+                            .font(.system(size: 9, weight: .medium, design: .monospaced))
+                            .foregroundStyle(abs(segment.rate - rate) < 0.01 ? .white : .secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .fill(abs(segment.rate - rate) < 0.01 ? Color.orange.opacity(0.3) : Color.white.opacity(0.05))
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            Divider()
+                .frame(height: 16)
+
+            HStack(spacing: 4) {
+                Button { adjustSpeedRate(delta: -0.25) } label: {
+                    Image(systemName: "minus").font(.system(size: 10)).foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+
+                Text("\(String(format: "%.2f", segment.rate))x")
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.white)
+                    .frame(width: 40)
+
+                Button { adjustSpeedRate(delta: 0.25) } label: {
+                    Image(systemName: "plus").font(.system(size: 10)).foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+
+        Spacer()
+
+        Button(action: onDelete) {
+            Image(systemName: "trash").font(.system(size: 11)).foregroundStyle(.red)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func formatDuration(_ duration: Double) -> String {
+        String(format: "%.1fs", duration)
+    }
+
+    private func updateSpeedStart(_ newStart: Double) {
+        guard var project = appState.currentProject,
+              speedIndex < project.edit.speedSegments.count else { return }
+        let minDuration = 0.1
+        let clamped = max(0, min(newStart, segment.end - minDuration))
+        project.edit.speedSegments[speedIndex].start = clamped
+        appState.currentProject = project
+        appState.saveCurrentProject()
+    }
+
+    private func updateSpeedEnd(_ newEnd: Double) {
+        guard var project = appState.currentProject,
+              speedIndex < project.edit.speedSegments.count else { return }
+        let minDuration = 0.1
+        let clamped = max(segment.start + minDuration, min(newEnd, sourceDuration))
+        project.edit.speedSegments[speedIndex].end = clamped
+        appState.currentProject = project
+        appState.saveCurrentProject()
+    }
+
+    private func adjustSpeedRate(delta: Double) {
+        guard var project = appState.currentProject,
+              speedIndex < project.edit.speedSegments.count else { return }
+        let currentRate = project.edit.speedSegments[speedIndex].rate
+        let newRate = max(0.25, min(4.0, currentRate + delta))
+        project.edit.speedSegments[speedIndex].rate = newRate
+        appState.currentProject = project
+        appState.saveCurrentProject()
+    }
+
+    private func setSpeedRate(rate: Double) {
+        guard var project = appState.currentProject,
+              speedIndex < project.edit.speedSegments.count else { return }
+        let newRate = max(0.25, min(4.0, rate))
+        project.edit.speedSegments[speedIndex].rate = newRate
+        appState.currentProject = project
+        appState.saveCurrentProject()
+    }
+}
+
+// MARK: - Cursor Override Selection Info
+
+struct CursorOverrideSelectionInfo: View {
+    @EnvironmentObject var appState: AppState
+    let cursorIndex: Int
+    let sourceDuration: Double
+    let onDelete: () -> Void
+
+    private var override: CursorOverride {
+        appState.cursorOverrides[cursorIndex]
+    }
+
+    private var startTime: Binding<Double> {
+        Binding(
+            get: { override.start },
+            set: { newValue in updateCursorStart(newValue) }
+        )
+    }
+
+    private var endTime: Binding<Double> {
+        Binding(
+            get: { override.end },
+            set: { newValue in updateCursorEnd(newValue) }
+        )
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(Color.cyan)
+                .frame(width: 8, height: 8)
+
+            Text("CURSOR \(cursorIndex + 1)")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.cyan)
+
+            Divider()
+                .frame(height: 16)
+
+            TimeInput(seconds: startTime, label: "START", sourceDuration: sourceDuration)
+            TimeInput(seconds: endTime, label: "END", sourceDuration: sourceDuration)
+
+            Divider()
+                .frame(height: 16)
+
+            Button { toggleHideCursor() } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: override.hideCursor == true ? "eye.slash" : "eye")
+                        .font(.system(size: 10))
+                    Text(override.hideCursor == true ? "HIDDEN" : "VISIBLE")
+                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                }
+                .foregroundStyle(override.hideCursor == true ? .red : .green)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(override.hideCursor == true ? Color.red.opacity(0.2) : Color.green.opacity(0.2))
+                )
+            }
+            .buttonStyle(.plain)
+
+            Button { toggleSmoothing() } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: override.disableSmoothing == true ? "waveform.path" : "waveform.path.ecg")
+                        .font(.system(size: 10))
+                    Text(override.disableSmoothing == true ? "RAW" : "SMOOTH")
+                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                }
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(RoundedRectangle(cornerRadius: 4).fill(Color.white.opacity(0.05)))
+            }
+            .buttonStyle(.plain)
+
+            if let scale = override.cursorScale {
+                HStack(spacing: 4) {
+                    Text("SCALE").font(.system(size: 9, weight: .medium, design: .monospaced)).foregroundStyle(.secondary)
+                    Button { adjustCursorScale(delta: -0.25) } label: { Image(systemName: "minus").font(.system(size: 10)) }.buttonStyle(.plain)
+                    Text("\(String(format: "%.2f", scale))x").font(.system(size: 10, weight: .medium, design: .monospaced)).foregroundStyle(.white).frame(width: 40)
+                    Button { adjustCursorScale(delta: 0.25) } label: { Image(systemName: "plus").font(.system(size: 10)) }.buttonStyle(.plain)
+                }
+            }
+        }
+
+        Spacer()
+
+        Button(action: onDelete) {
+            Image(systemName: "trash").font(.system(size: 11)).foregroundStyle(.red)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func updateCursorStart(_ newStart: Double) {
+        guard var project = appState.currentProject, cursorIndex < project.edit.cursorOverrides.count else { return }
+        let clamped = max(0, min(newStart, override.end - 0.1))
+        project.edit.cursorOverrides[cursorIndex].start = clamped
+        appState.currentProject = project
+        appState.saveCurrentProject()
+    }
+
+    private func updateCursorEnd(_ newEnd: Double) {
+        guard var project = appState.currentProject, cursorIndex < project.edit.cursorOverrides.count else { return }
+        let clamped = max(override.start + 0.1, min(newEnd, sourceDuration))
+        project.edit.cursorOverrides[cursorIndex].end = clamped
+        appState.currentProject = project
+        appState.saveCurrentProject()
+    }
+
+    private func toggleHideCursor() {
+        guard var project = appState.currentProject, cursorIndex < project.edit.cursorOverrides.count else { return }
+        project.edit.cursorOverrides[cursorIndex].hideCursor = !(override.hideCursor ?? false)
+        appState.currentProject = project
+        appState.saveCurrentProject()
+    }
+
+    private func toggleSmoothing() {
+        guard var project = appState.currentProject, cursorIndex < project.edit.cursorOverrides.count else { return }
+        project.edit.cursorOverrides[cursorIndex].disableSmoothing = !(override.disableSmoothing ?? false)
+        appState.currentProject = project
+        appState.saveCurrentProject()
+    }
+
+    private func adjustCursorScale(delta: Double) {
+        guard var project = appState.currentProject, cursorIndex < project.edit.cursorOverrides.count else { return }
+        let newScale = max(0.25, min(4.0, (override.cursorScale ?? 1.0) + delta))
+        project.edit.cursorOverrides[cursorIndex].cursorScale = newScale
+        appState.currentProject = project
+        appState.saveCurrentProject()
+    }
+}
+
+// MARK: - Clip Selection Info
+
+struct ClipSelectionInfo: View {
+    @EnvironmentObject var appState: AppState
+    let clipIndex: Int
+    let sourceDuration: Double
+
+    private var clipStart: Double {
+        let cuts = appState.cuts.sorted { $0.start < $1.start }
+        if clipIndex > 0, clipIndex - 1 < cuts.count { return cuts[clipIndex - 1].end }
+        return 0
+    }
+
+    private var clipEnd: Double {
+        let cuts = appState.cuts.sorted { $0.start < $1.start }
+        if clipIndex < cuts.count { return cuts[clipIndex].start }
+        return sourceDuration
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle().fill(Color.yellow).frame(width: 8, height: 8)
+
+            Text("CLIP \(clipIndex + 1)")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.yellow)
+
+            Divider().frame(height: 16)
+
+            HStack(spacing: 4) {
+                Text("START").font(.system(size: 9, weight: .medium, design: .monospaced)).foregroundStyle(.secondary)
+                Text(formatTime(clipStart)).font(.system(size: 10, design: .monospaced)).foregroundStyle(.white)
+            }
+
+            HStack(spacing: 4) {
+                Text("END").font(.system(size: 9, weight: .medium, design: .monospaced)).foregroundStyle(.secondary)
+                Text(formatTime(clipEnd)).font(.system(size: 10, design: .monospaced)).foregroundStyle(.white)
+            }
+
+            Text("(\(formatDuration(clipEnd - clipStart)))").font(.system(size: 9, design: .monospaced)).foregroundStyle(.tertiary)
+
+            Divider().frame(height: 16)
+
+            Text("Drag clip edges to adjust cuts").font(.system(size: 9)).foregroundStyle(.secondary)
+        }
+
+        Spacer()
+    }
+
+    private func formatTime(_ time: Double) -> String {
+        let totalSeconds = Int(time)
+        let minutes = totalSeconds / 60
+        let secs = totalSeconds % 60
+        let frames = Int((time - Double(totalSeconds)) * 30)
+        return String(format: "%d:%02d:%02d", minutes, secs, frames)
+    }
+
+    private func formatDuration(_ duration: Double) -> String {
+        String(format: "%.1fs", duration)
     }
 }
 
@@ -2247,6 +3596,7 @@ enum TimelineTrackType {
     case clip
     case zoom
     case speed
+    case cursor
     case audio
 }
 
@@ -2261,10 +3611,17 @@ struct TimelineTrack: View {
     var playheadPosition: CGFloat = 0 // Normalized 0-1
     var allSegmentEdges: [CGFloat] = [] // All segment start/end positions for snapping
     var onSegmentTap: ((Int) -> Void)?
+    var onSegmentDoubleClick: ((Int) -> Void)?
+    var onSegmentContextMenu: ((Int) -> Void)?
     var onAddSegment: ((CGFloat) -> Void)?
     var onResizeStart: ((Int, CGFloat) -> Void)? // index, new start
     var onResizeEnd: ((Int, CGFloat) -> Void)?   // index, new end
     var onDragEnded: (() -> Void)?
+    var onConvertToManual: ((Int) -> Void)?
+    var onDeleteSegment: ((Int) -> Void)?
+    var onRemoveAdjacentCut: ((Int) -> Void)?  // For clip track - remove cut before/after this clip
+    var onResetSpeed: ((Int) -> Void)?         // For speed track - reset to 1x
+    var onChangeSpeed: ((Int, Double) -> Void)? // For clip track - change speed for segment
 
     @State private var hoveredSegmentIndex: Int?
 
@@ -2314,10 +3671,12 @@ struct TimelineTrack: View {
                             index: index,
                             color: color,
                             trackWidth: trackWidth,
+                            trackType: trackType,
                             isHovered: hoveredSegmentIndex == index,
                             snapPoints: snapPoints,
                             snapEnabled: snapEnabled,
                             onTap: { onSegmentTap?(index) },
+                            onDoubleClick: { onSegmentDoubleClick?(index) },
                             onResizeStart: { newStart in
                                 onResizeStart?(index, newStart)
                             },
@@ -2326,7 +3685,12 @@ struct TimelineTrack: View {
                             },
                             onDragEnded: {
                                 onDragEnded?()
-                            }
+                            },
+                            onConvertToManual: trackType == .zoom ? { onConvertToManual?(index) } : nil,
+                            onDelete: { onDeleteSegment?(index) },
+                            onRemoveAdjacentCut: trackType == .clip ? { onRemoveAdjacentCut?(index) } : nil,
+                            onResetSpeed: trackType == .speed ? { onResetSpeed?(index) } : nil,
+                            onChangeSpeed: trackType == .clip ? { rate in onChangeSpeed?(index, rate) } : nil
                         )
                         .onHover { isHovered in
                             hoveredSegmentIndex = isHovered ? index : nil
@@ -2350,22 +3714,31 @@ struct InteractiveSegment: View {
     let index: Int
     let color: Color
     let trackWidth: CGFloat
+    var trackType: TimelineTrackType = .clip
     let isHovered: Bool
     let snapPoints: [CGFloat] // Normalized snap points (0-1)
     let snapEnabled: Bool
     let onTap: () -> Void
+    var onDoubleClick: (() -> Void)?
     let onResizeStart: (CGFloat) -> Void // Pass new normalized start position
     let onResizeEnd: (CGFloat) -> Void   // Pass new normalized end position
     let onDragEnded: () -> Void
+    var onConvertToManual: (() -> Void)?
+    var onDelete: (() -> Void)?
+    var onRemoveAdjacentCut: (() -> Void)?  // For clip track
+    var onResetSpeed: (() -> Void)?         // For speed track
+    var onChangeSpeed: ((Double) -> Void)?  // For clip track
 
     @State private var isDraggingStart = false
     @State private var isDraggingEnd = false
     @State private var dragStartPosition: CGFloat = 0
     @State private var initialStart: CGFloat = 0
     @State private var initialEnd: CGFloat = 0
+    @State private var lastClickTime: Date = .distantPast
 
     private let snapThreshold: CGFloat = 8 // pixels
     private let minimumSegmentWidth: CGFloat = 0.02 // 2% minimum width
+    private let doubleClickInterval: TimeInterval = 0.3
 
     private var segmentWidth: CGFloat {
         max(0, (segment.end - segment.start) * trackWidth)
@@ -2403,7 +3776,89 @@ struct InteractiveSegment: View {
                 )
                 .frame(width: segmentWidth)
                 .onTapGesture {
-                    onTap()
+                    let now = Date()
+                    if now.timeIntervalSince(lastClickTime) < doubleClickInterval {
+                        // Double click
+                        onDoubleClick?()
+                    } else {
+                        // Single click
+                        onTap()
+                    }
+                    lastClickTime = now
+                }
+                .contextMenu {
+                    if trackType == .zoom {
+                        Button {
+                            onConvertToManual?()
+                        } label: {
+                            Label("Convert to Manual", systemImage: "lock.fill")
+                        }
+
+                        Button {
+                            onDoubleClick?()
+                        } label: {
+                            Label("Edit Target", systemImage: "scope")
+                        }
+
+                        Divider()
+
+                        Button(role: .destructive) {
+                            onDelete?()
+                        } label: {
+                            Label("Delete Zoom", systemImage: "trash")
+                        }
+                    }
+
+                    if trackType == .clip {
+                        Menu {
+                            Button("0.5x") {
+                                onChangeSpeed?(0.5)
+                            }
+                            Button("1.0x") {
+                                onChangeSpeed?(1.0)
+                            }
+                            Button("1.5x") {
+                                onChangeSpeed?(1.5)
+                            }
+                            Button("2.0x") {
+                                onChangeSpeed?(2.0)
+                            }
+                        } label: {
+                            Label("Change Speed", systemImage: "speedometer")
+                        }
+
+                        if onRemoveAdjacentCut != nil {
+                            Button {
+                                onRemoveAdjacentCut?()
+                            } label: {
+                                Label("Remove Adjacent Cut", systemImage: "arrow.left.and.right.square")
+                            }
+                        }
+
+                        Divider()
+
+                        Button(role: .destructive) {
+                            onDelete?()
+                        } label: {
+                            Label("Cut This Section", systemImage: "scissors")
+                        }
+                    }
+
+                    if trackType == .speed {
+                        Button {
+                            onResetSpeed?()
+                        } label: {
+                            Label("Reset to 1x", systemImage: "arrow.counterclockwise")
+                        }
+
+                        Divider()
+
+                        Button(role: .destructive) {
+                            onDelete?()
+                        } label: {
+                            Label("Delete Speed Change", systemImage: "trash")
+                        }
+                    }
                 }
 
             // Start handle
@@ -2490,6 +3945,319 @@ struct InteractiveSegment: View {
     }
 }
 
+// MARK: - Zoom Target Overlay
+
+struct ZoomTargetOverlay: View {
+    @EnvironmentObject var appState: AppState
+    let zoomIndex: Int
+    let previewSize: CGSize
+    let onDismiss: () -> Void
+
+    @State private var isDragging = false
+    @State private var isResizing = false
+    @State private var dragOffset: CGSize = .zero
+    @State private var resizeCorner: ResizeCorner?
+    @State private var initialRect: CGRect = .zero
+
+    enum ResizeCorner {
+        case topLeft, topRight, bottomLeft, bottomRight
+    }
+
+    private var segment: ZoomSegment? {
+        guard zoomIndex < appState.zoomSegments.count else { return nil }
+        return appState.zoomSegments[zoomIndex]
+    }
+
+    private var sourceSize: CGSize {
+        guard let project = appState.currentProject,
+              let width = project.assets.screen.width,
+              let height = project.assets.screen.height else {
+            return CGSize(width: 1920, height: 1080)
+        }
+        return CGSize(width: width, height: height)
+    }
+
+    private var displayRect: CGRect {
+        guard let segment = segment,
+              let targetRect = segment.targetRect else {
+            // Default to center with current scale
+            let scale = segment?.scale ?? 2.0
+            let width = sourceSize.width / scale
+            let height = sourceSize.height / scale
+            return CGRect(
+                x: (sourceSize.width - width) / 2,
+                y: (sourceSize.height - height) / 2,
+                width: width,
+                height: height
+            )
+        }
+        return CGRect(
+            x: targetRect.x,
+            y: targetRect.y,
+            width: targetRect.width,
+            height: targetRect.height
+        )
+    }
+
+    private func sourceToPreview(_ rect: CGRect) -> CGRect {
+        let scaleX = previewSize.width / sourceSize.width
+        let scaleY = previewSize.height / sourceSize.height
+        return CGRect(
+            x: rect.minX * scaleX,
+            y: rect.minY * scaleY,
+            width: rect.width * scaleX,
+            height: rect.height * scaleY
+        )
+    }
+
+    private func previewToSource(_ rect: CGRect) -> CGRect {
+        let scaleX = sourceSize.width / previewSize.width
+        let scaleY = sourceSize.height / previewSize.height
+        return CGRect(
+            x: rect.minX * scaleX,
+            y: rect.minY * scaleY,
+            width: rect.width * scaleX,
+            height: rect.height * scaleY
+        )
+    }
+
+    var body: some View {
+        let previewRect = sourceToPreview(displayRect)
+
+        ZStack {
+            // Dimmed overlay outside the zoom rect
+            Color.black.opacity(0.5)
+                .mask(
+                    Rectangle()
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4)
+                                .frame(width: previewRect.width, height: previewRect.height)
+                                .position(x: previewRect.midX, y: previewRect.midY)
+                                .blendMode(.destinationOut)
+                        )
+                )
+                .allowsHitTesting(false)
+
+            // Zoom target rectangle
+            ZStack {
+                // Border
+                RoundedRectangle(cornerRadius: 4)
+                    .strokeBorder(Color.purple, lineWidth: 2)
+                    .frame(width: previewRect.width, height: previewRect.height)
+
+                // Corner handles
+                cornerHandle(corner: .topLeft)
+                    .position(x: 0, y: 0)
+                cornerHandle(corner: .topRight)
+                    .position(x: previewRect.width, y: 0)
+                cornerHandle(corner: .bottomLeft)
+                    .position(x: 0, y: previewRect.height)
+                cornerHandle(corner: .bottomRight)
+                    .position(x: previewRect.width, y: previewRect.height)
+
+                // Scale indicator
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        Text("\(String(format: "%.1f", segment?.scale ?? 1.0))x")
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(Color.purple.opacity(0.9))
+                            .cornerRadius(4)
+                            .padding(8)
+                    }
+                }
+                .frame(width: previewRect.width, height: previewRect.height)
+            }
+            .position(x: previewRect.midX, y: previewRect.midY)
+            .gesture(
+                DragGesture()
+                    .onChanged { value in
+                        if !isDragging {
+                            isDragging = true
+                            initialRect = previewRect
+                        }
+                        let newX = initialRect.midX + value.translation.width
+                        let newY = initialRect.midY + value.translation.height
+                        updateTargetPosition(centerX: newX, centerY: newY, width: previewRect.width, height: previewRect.height)
+                    }
+                    .onEnded { _ in
+                        isDragging = false
+                        appState.saveCurrentProject()
+                    }
+            )
+
+            // Dismiss button
+            VStack {
+                HStack {
+                    Spacer()
+                    Button {
+                        onDismiss()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 10, weight: .bold))
+                            Text("DONE")
+                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color.purple)
+                        .cornerRadius(6)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(12)
+                }
+                Spacer()
+            }
+
+            // Instructions
+            VStack {
+                Spacer()
+                Text("Drag to reposition • Drag corners to resize • Double-click to dismiss")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(0.8))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Color.black.opacity(0.6))
+                    .cornerRadius(4)
+                    .padding(.bottom, 12)
+            }
+        }
+        .frame(width: previewSize.width, height: previewSize.height)
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) {
+            onDismiss()
+        }
+    }
+
+    @ViewBuilder
+    private func cornerHandle(corner: ResizeCorner) -> some View {
+        Circle()
+            .fill(Color.white)
+            .frame(width: 12, height: 12)
+            .overlay(
+                Circle()
+                    .strokeBorder(Color.purple, lineWidth: 2)
+            )
+            .gesture(
+                DragGesture()
+                    .onChanged { value in
+                        if !isResizing {
+                            isResizing = true
+                            initialRect = sourceToPreview(displayRect)
+                            resizeCorner = corner
+                        }
+                        handleCornerResize(corner: corner, translation: value.translation)
+                    }
+                    .onEnded { _ in
+                        isResizing = false
+                        resizeCorner = nil
+                        appState.saveCurrentProject()
+                    }
+            )
+            .onHover { hovering in
+                if hovering {
+                    switch corner {
+                    case .topLeft, .bottomRight:
+                        NSCursor.crosshair.push()
+                    case .topRight, .bottomLeft:
+                        NSCursor.crosshair.push()
+                    }
+                } else {
+                    NSCursor.pop()
+                }
+            }
+    }
+
+    private func handleCornerResize(corner: ResizeCorner, translation: CGSize) {
+        var newRect = initialRect
+
+        switch corner {
+        case .topLeft:
+            newRect.origin.x += translation.width
+            newRect.origin.y += translation.height
+            newRect.size.width -= translation.width
+            newRect.size.height -= translation.height
+        case .topRight:
+            newRect.origin.y += translation.height
+            newRect.size.width += translation.width
+            newRect.size.height -= translation.height
+        case .bottomLeft:
+            newRect.origin.x += translation.width
+            newRect.size.width -= translation.width
+            newRect.size.height += translation.height
+        case .bottomRight:
+            newRect.size.width += translation.width
+            newRect.size.height += translation.height
+        }
+
+        // Ensure minimum size
+        let minSize: CGFloat = 50
+        if newRect.width < minSize { newRect.size.width = minSize }
+        if newRect.height < minSize { newRect.size.height = minSize }
+
+        // Clamp to preview bounds
+        if newRect.minX < 0 { newRect.origin.x = 0 }
+        if newRect.minY < 0 { newRect.origin.y = 0 }
+        if newRect.maxX > previewSize.width { newRect.size.width = previewSize.width - newRect.minX }
+        if newRect.maxY > previewSize.height { newRect.size.height = previewSize.height - newRect.minY }
+
+        let sourceRect = previewToSource(newRect)
+        updateZoomSegment(with: sourceRect)
+    }
+
+    private func updateTargetPosition(centerX: CGFloat, centerY: CGFloat, width: CGFloat, height: CGFloat) {
+        // Clamp to bounds
+        let halfW = width / 2
+        let halfH = height / 2
+        let clampedX = max(halfW, min(centerX, previewSize.width - halfW))
+        let clampedY = max(halfH, min(centerY, previewSize.height - halfH))
+
+        let newRect = CGRect(
+            x: clampedX - halfW,
+            y: clampedY - halfH,
+            width: width,
+            height: height
+        )
+
+        let sourceRect = previewToSource(newRect)
+        updateZoomSegment(with: sourceRect)
+    }
+
+    private func updateZoomSegment(with sourceRect: CGRect) {
+        guard var project = appState.currentProject,
+              zoomIndex < project.edit.zoomSegments.count else { return }
+
+        // Calculate scale from rect size
+        let scale = max(1.0, min(5.0, sourceSize.width / sourceRect.width))
+
+        project.edit.zoomSegments[zoomIndex].targetRect = TargetRect(
+            x: sourceRect.minX,
+            y: sourceRect.minY,
+            width: sourceRect.width,
+            height: sourceRect.height
+        )
+        project.edit.zoomSegments[zoomIndex].targetPoint = TargetPoint(
+            x: sourceRect.midX,
+            y: sourceRect.midY
+        )
+        project.edit.zoomSegments[zoomIndex].scale = scale
+        project.edit.zoomSegments[zoomIndex].mode = .manual
+
+        appState.currentProject = project
+
+        // Update preview
+        Task {
+            await appState.updatePreviewFrame()
+        }
+    }
+}
+
 // MARK: - Color Extension
 
 extension Color {
@@ -2509,6 +4277,9 @@ extension Color {
 }
 
 #Preview {
+    @Previewable @State var editingIndex: Int? = nil
+    @Previewable @State var selectedIndex: Int? = nil
+
     EditorView()
         .environmentObject({
             let state = AppState()
