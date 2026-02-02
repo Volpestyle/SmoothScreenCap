@@ -2,11 +2,13 @@ import Foundation
 
 public struct ProjectModel: Codable, Equatable {
   public static let currentVersion = "1"
+  public static let currentEngineVersion = "0.1.0"
   public static let projectFilename = "project.json"
 
   public var id: UUID
   public var createdAt: Date
   public var version: String
+  public var engineVersion: String
   public var appVersion: String?
   public var assets: Assets
   public var edit: Edit
@@ -15,6 +17,7 @@ public struct ProjectModel: Codable, Equatable {
     id: UUID,
     createdAt: Date,
     version: String,
+    engineVersion: String = ProjectModel.currentEngineVersion,
     appVersion: String? = nil,
     assets: Assets,
     edit: Edit
@@ -22,9 +25,43 @@ public struct ProjectModel: Codable, Equatable {
     self.id = id
     self.createdAt = createdAt
     self.version = version
+    self.engineVersion = engineVersion
     self.appVersion = appVersion
     self.assets = assets
     self.edit = edit
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case id
+    case createdAt
+    case version
+    case engineVersion
+    case appVersion
+    case assets
+    case edit
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    id = try container.decode(UUID.self, forKey: .id)
+    createdAt = try container.decode(Date.self, forKey: .createdAt)
+    version = try container.decode(String.self, forKey: .version)
+    engineVersion = try container.decodeIfPresent(String.self, forKey: .engineVersion)
+      ?? ProjectModel.currentEngineVersion
+    appVersion = try container.decodeIfPresent(String.self, forKey: .appVersion)
+    assets = try container.decode(Assets.self, forKey: .assets)
+    edit = try container.decode(Edit.self, forKey: .edit)
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encode(id, forKey: .id)
+    try container.encode(createdAt, forKey: .createdAt)
+    try container.encode(version, forKey: .version)
+    try container.encode(engineVersion, forKey: .engineVersion)
+    try container.encodeIfPresent(appVersion, forKey: .appVersion)
+    try container.encode(assets, forKey: .assets)
+    try container.encode(edit, forKey: .edit)
   }
 
   public func encodedJSON(prettyPrinted: Bool = false) throws -> Data {
@@ -115,6 +152,7 @@ public struct Edit: Codable, Equatable {
   public var cursorOverrides: [CursorOverride]
   public var background: Background
   public var motion: Motion
+  public var cursorSettings: CursorSettings?
   public var audioSettings: AudioSettings?
   public var exportPresets: [ExportPreset]
 
@@ -125,6 +163,7 @@ public struct Edit: Codable, Equatable {
     cursorOverrides: [CursorOverride],
     background: Background,
     motion: Motion,
+    cursorSettings: CursorSettings? = nil,
     audioSettings: AudioSettings? = nil,
     exportPresets: [ExportPreset]
   ) {
@@ -134,6 +173,7 @@ public struct Edit: Codable, Equatable {
     self.cursorOverrides = cursorOverrides
     self.background = background
     self.motion = motion
+    self.cursorSettings = cursorSettings
     self.audioSettings = audioSettings
     self.exportPresets = exportPresets
   }
@@ -346,6 +386,96 @@ public struct Motion: Codable, Equatable {
     self.cursorStyle = cursorStyle
     self.zoomStyle = zoomStyle
     self.spring = spring
+  }
+}
+
+public struct CursorSettings: Codable, Equatable {
+  public var scale: Double
+  public var clickHighlightEnabled: Bool
+  public var clickHighlightColor: String
+  public var clickHighlightOpacity: Double
+  public var clickSoundEnabled: Bool
+  public var clickSoundVolume: Double
+  public var idleHideEnabled: Bool
+  public var idleHideDelay: Double
+  public var smoothingEnabled: Bool
+  public var smoothingMinCutoff: Double
+  public var smoothingBeta: Double
+  public var smoothingDCutoff: Double
+
+  public init(
+    scale: Double = 1.5,
+    clickHighlightEnabled: Bool = true,
+    clickHighlightColor: String = "#FFFFFF",
+    clickHighlightOpacity: Double = 0.5,
+    clickSoundEnabled: Bool = true,
+    clickSoundVolume: Double = 0.6,
+    idleHideEnabled: Bool = true,
+    idleHideDelay: Double = 2.0,
+    smoothingEnabled: Bool = true,
+    smoothingMinCutoff: Double = 1.0,
+    smoothingBeta: Double = 0.007,
+    smoothingDCutoff: Double = 1.0
+  ) {
+    self.scale = scale
+    self.clickHighlightEnabled = clickHighlightEnabled
+    self.clickHighlightColor = clickHighlightColor
+    self.clickHighlightOpacity = clickHighlightOpacity
+    self.clickSoundEnabled = clickSoundEnabled
+    self.clickSoundVolume = clickSoundVolume
+    self.idleHideEnabled = idleHideEnabled
+    self.idleHideDelay = idleHideDelay
+    self.smoothingEnabled = smoothingEnabled
+    self.smoothingMinCutoff = smoothingMinCutoff
+    self.smoothingBeta = smoothingBeta
+    self.smoothingDCutoff = smoothingDCutoff
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case scale
+    case clickHighlightEnabled
+    case clickHighlightColor
+    case clickHighlightOpacity
+    case clickSoundEnabled
+    case clickSoundVolume
+    case idleHideEnabled
+    case idleHideDelay
+    case smoothingEnabled
+    case smoothingMinCutoff
+    case smoothingBeta
+    case smoothingDCutoff
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    scale = try container.decodeIfPresent(Double.self, forKey: .scale) ?? 1.5
+    clickHighlightEnabled = try container.decodeIfPresent(Bool.self, forKey: .clickHighlightEnabled) ?? true
+    clickHighlightColor = try container.decodeIfPresent(String.self, forKey: .clickHighlightColor) ?? "#FFFFFF"
+    clickHighlightOpacity = try container.decodeIfPresent(Double.self, forKey: .clickHighlightOpacity) ?? 0.5
+    clickSoundEnabled = try container.decodeIfPresent(Bool.self, forKey: .clickSoundEnabled) ?? true
+    clickSoundVolume = try container.decodeIfPresent(Double.self, forKey: .clickSoundVolume) ?? 0.6
+    idleHideEnabled = try container.decodeIfPresent(Bool.self, forKey: .idleHideEnabled) ?? true
+    idleHideDelay = try container.decodeIfPresent(Double.self, forKey: .idleHideDelay) ?? 2.0
+    smoothingEnabled = try container.decodeIfPresent(Bool.self, forKey: .smoothingEnabled) ?? true
+    smoothingMinCutoff = try container.decodeIfPresent(Double.self, forKey: .smoothingMinCutoff) ?? 1.0
+    smoothingBeta = try container.decodeIfPresent(Double.self, forKey: .smoothingBeta) ?? 0.007
+    smoothingDCutoff = try container.decodeIfPresent(Double.self, forKey: .smoothingDCutoff) ?? 1.0
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encode(scale, forKey: .scale)
+    try container.encode(clickHighlightEnabled, forKey: .clickHighlightEnabled)
+    try container.encode(clickHighlightColor, forKey: .clickHighlightColor)
+    try container.encode(clickHighlightOpacity, forKey: .clickHighlightOpacity)
+    try container.encode(clickSoundEnabled, forKey: .clickSoundEnabled)
+    try container.encode(clickSoundVolume, forKey: .clickSoundVolume)
+    try container.encode(idleHideEnabled, forKey: .idleHideEnabled)
+    try container.encode(idleHideDelay, forKey: .idleHideDelay)
+    try container.encode(smoothingEnabled, forKey: .smoothingEnabled)
+    try container.encode(smoothingMinCutoff, forKey: .smoothingMinCutoff)
+    try container.encode(smoothingBeta, forKey: .smoothingBeta)
+    try container.encode(smoothingDCutoff, forKey: .smoothingDCutoff)
   }
 }
 

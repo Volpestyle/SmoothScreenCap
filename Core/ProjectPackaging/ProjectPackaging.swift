@@ -100,6 +100,7 @@ public struct ProjectDefaults: Equatable {
 
 public struct ProjectPackagingOptions: Equatable {
   public var appVersion: String
+  public var engineVersion: String
   public var defaults: ProjectDefaults
   public var autoZoomEnabled: Bool
   public var autoZoomConfig: AutoZoom.Config
@@ -108,6 +109,7 @@ public struct ProjectPackagingOptions: Equatable {
 
   public init(
     appVersion: String,
+    engineVersion: String = ProjectModel.currentEngineVersion,
     defaults: ProjectDefaults = .standard,
     autoZoomEnabled: Bool = true,
     autoZoomConfig: AutoZoom.Config = AutoZoom.Config(),
@@ -115,6 +117,7 @@ public struct ProjectPackagingOptions: Equatable {
     filenames: ProjectPackageFilenames = ProjectPackageFilenames()
   ) {
     self.appVersion = appVersion
+    self.engineVersion = engineVersion
     self.defaults = defaults
     self.autoZoomEnabled = autoZoomEnabled
     self.autoZoomConfig = autoZoomConfig
@@ -261,17 +264,21 @@ public enum ProjectPackager {
       cursorOverrides: options.defaults.cursorOverrides,
       background: options.defaults.background,
       motion: options.defaults.motion,
+      cursorSettings: CursorSettings(),
       exportPresets: options.defaults.exportPresets
     )
 
-    return ProjectModel(
+    let project = ProjectModel(
       id: UUID(),
       createdAt: Date(),
       version: ProjectModel.currentVersion,
+      engineVersion: options.engineVersion,
       appVersion: options.appVersion,
       assets: assetsModel,
       edit: edit
     )
+    try ProjectValidator.validateOrThrow(project)
+    return project
   }
 
   private static func copyOptional(from source: URL?, to destination: URL) throws -> URL? {

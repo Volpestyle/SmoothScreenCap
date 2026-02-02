@@ -5,38 +5,61 @@ import Foundation
 import ProjectModel
 import Rendering
 import TimeMapping
+import EventLog
+#if canImport(AppKit)
+import AppKit
+#endif
 
 public struct ExportRequest {
   public var sourceVideoURL: URL
   public var systemAudioURL: URL?
   public var microphoneAudioURL: URL?
+  public var eventsURL: URL?
   public var timeMapping: TimeMapping
   public var outputURL: URL
   public var preset: ExportPreset
   public var renderer: VideoFrameRenderer
   public var temporaryDirectory: URL
   public var onProgress: ((Double) -> Void)?
+  public var engineVersion: String
+  public var clickSound: ClickSoundConfiguration?
 
   public init(
     sourceVideoURL: URL,
     systemAudioURL: URL? = nil,
     microphoneAudioURL: URL? = nil,
+    eventsURL: URL? = nil,
     timeMapping: TimeMapping,
     outputURL: URL,
     preset: ExportPreset,
     renderer: VideoFrameRenderer,
     temporaryDirectory: URL,
-    onProgress: ((Double) -> Void)? = nil
+    onProgress: ((Double) -> Void)? = nil,
+    engineVersion: String = ProjectModel.currentEngineVersion,
+    clickSound: ClickSoundConfiguration? = nil
   ) {
     self.sourceVideoURL = sourceVideoURL
     self.systemAudioURL = systemAudioURL
     self.microphoneAudioURL = microphoneAudioURL
+    self.eventsURL = eventsURL
     self.timeMapping = timeMapping
     self.outputURL = outputURL
     self.preset = preset
     self.renderer = renderer
     self.temporaryDirectory = temporaryDirectory
     self.onProgress = onProgress
+    self.engineVersion = engineVersion
+    self.clickSound = clickSound
+  }
+}
+
+public struct ClickSoundConfiguration: Equatable {
+  public var soundURL: URL
+  public var volume: Double
+
+  public init(soundURL: URL, volume: Double = 0.6) {
+    self.soundURL = soundURL
+    self.volume = volume
   }
 }
 
@@ -47,7 +70,11 @@ public final class ExportEngine {
     case missingPixelBufferPool
     case audioExportFailed
     case outputNotReady
+    case clipboardUnavailable
   }
+
+  // Fixed seed for any future randomness to keep exports deterministic.
+  public static let deterministicSeed: UInt64 = 0x535343
 
   public init() {}
 
@@ -82,6 +109,7 @@ public final class ExportEngine {
     reader.startReading()
 
     let writer = try AVAssetWriter(outputURL: request.outputURL, fileType: .mp4)
+    writer.metadata = makeEngineVersionMetadata(engineVersion: request.engineVersion)
     let videoSettings = makeVideoSettings(preset: request.preset)
     let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
     videoInput.expectsMediaDataInRealTime = false
@@ -216,10 +244,15 @@ public final class ExportEngine {
   }
 
   private func exportAudioIfNeeded(request: ExportRequest) async throws -> URL? {
-    guard request.systemAudioURL != nil || request.microphoneAudioURL != nil else {
+    let hasBaseAudio = request.systemAudioURL != nil || request.microphoneAudioURL != nil
+    let hasClickSound = request.clickSound != nil && request.eventsURL != nil
+    guard hasBaseAudio || hasClickSound else {
       return nil
     }
-    let composition = try buildAudioComposition(request: request)
+    let (composition, audioMix) = try buildAudioComposition(request: request)
+    if composition.tracks(withMediaType: .audio).isEmpty {
+      return nil
+    }
     let outputURL = request.temporaryDirectory.appendingPathComponent("ssc_audio.m4a")
     if FileManager.default.fileExists(atPath: outputURL.path) {
       try FileManager.default.removeItem(at: outputURL)
@@ -233,7 +266,11 @@ public final class ExportEngine {
     }
     exporter.outputURL = outputURL
     exporter.outputFileType = .m4a
+    // Preserve pitch when time-scaling audio for speed segments.
     exporter.audioTimePitchAlgorithm = .timeDomain
+    if let audioMix {
+      exporter.audioMix = audioMix
+    }
     await exporter.export()
     if exporter.status != .completed {
       throw exporter.error ?? ExportError.audioExportFailed
@@ -241,12 +278,34 @@ public final class ExportEngine {
     return outputURL
   }
 
-  private func buildAudioComposition(request: ExportRequest) throws -> AVMutableComposition {
+  private func buildAudioComposition(request: ExportRequest) throws -> (AVMutableComposition, AVAudioMix?) {
     let composition = AVMutableComposition()
     let segments = request.timeMapping.segments
     try addAudioTrack(url: request.systemAudioURL, to: composition, segments: segments)
     try addAudioTrack(url: request.microphoneAudioURL, to: composition, segments: segments)
-    return composition
+
+    var mixParameters: [AVAudioMixInputParameters] = []
+    if let clickConfig = request.clickSound, let eventsURL = request.eventsURL {
+      let clickTimes = try loadClickTimes(from: eventsURL)
+      if !clickTimes.isEmpty {
+        let outputTimes = clickTimes.compactMap { request.timeMapping.outputTime(for: $0) }
+        let params = try addClickSoundTracks(
+          soundURL: clickConfig.soundURL,
+          times: outputTimes,
+          outputDuration: request.timeMapping.outputDuration,
+          to: composition,
+          volume: clickConfig.volume
+        )
+        mixParameters.append(contentsOf: params)
+      }
+    }
+
+    if mixParameters.isEmpty {
+      return (composition, nil)
+    }
+    let audioMix = AVMutableAudioMix()
+    audioMix.inputParameters = mixParameters
+    return (composition, audioMix)
   }
 
   private func addAudioTrack(
@@ -262,19 +321,109 @@ public final class ExportEngine {
       preferredTrackID: kCMPersistentTrackID_Invalid
     ) else { return }
 
-    var cursor = CMTime.zero
     for segment in segments {
       let start = CMTime(seconds: segment.sourceStart, preferredTimescale: 600)
       let duration = CMTime(seconds: segment.sourceEnd - segment.sourceStart, preferredTimescale: 600)
       let sourceRange = CMTimeRange(start: start, duration: duration)
+      let cursor = CMTime(seconds: segment.outputStart, preferredTimescale: 600)
       try compTrack.insertTimeRange(sourceRange, of: track, at: cursor)
       let targetDuration = CMTime(
         seconds: (segment.sourceEnd - segment.sourceStart) / max(0.01, segment.rate),
         preferredTimescale: 600
       )
       compTrack.scaleTimeRange(CMTimeRange(start: cursor, duration: duration), toDuration: targetDuration)
-      cursor = cursor + targetDuration
     }
+  }
+
+  private func loadClickTimes(from url: URL) throws -> [Double] {
+    let entries = try EventLogReader.read(from: url)
+    return entries.compactMap { entry in
+      guard let mouse = entry.mouse else { return nil }
+      guard mouse.action == .down, mouse.button == .left else { return nil }
+      return entry.time
+    }
+  }
+
+  private func addClickSoundTracks(
+    soundURL: URL,
+    times: [Double],
+    outputDuration: Double,
+    to composition: AVMutableComposition,
+    volume: Double
+  ) throws -> [AVAudioMixInputParameters] {
+    guard !times.isEmpty else { return [] }
+    let asset = AVURLAsset(url: soundURL)
+    guard let track = asset.tracks(withMediaType: .audio).first else {
+      return []
+    }
+    let soundDuration = track.timeRange.duration
+    guard soundDuration.isValid, soundDuration.seconds > 0 else {
+      return []
+    }
+
+    let clampedVolume = Float(max(0, min(1, volume)))
+    let sortedTimes = times.sorted()
+    var tracks: [AVMutableCompositionTrack] = []
+    var trackEndTimes: [CMTime] = []
+    var mixParameters: [AVAudioMixInputParameters] = []
+
+    for time in sortedTimes {
+      guard time >= 0, time <= outputDuration else { continue }
+      let startTime = CMTime(seconds: time, preferredTimescale: 600)
+      let endTime = startTime + soundDuration
+
+      var selectedIndex: Int?
+      for (index, lastEnd) in trackEndTimes.enumerated() {
+        if CMTimeCompare(lastEnd, startTime) <= 0 {
+          selectedIndex = index
+          break
+        }
+      }
+
+      let targetTrack: AVMutableCompositionTrack
+      if let selectedIndex {
+        targetTrack = tracks[selectedIndex]
+        trackEndTimes[selectedIndex] = endTime
+      } else {
+        guard let newTrack = composition.addMutableTrack(
+          withMediaType: .audio,
+          preferredTrackID: kCMPersistentTrackID_Invalid
+        ) else { continue }
+        tracks.append(newTrack)
+        trackEndTimes.append(endTime)
+        let params = AVMutableAudioMixInputParameters(track: newTrack)
+        params.setVolume(clampedVolume, at: .zero)
+        mixParameters.append(params)
+        targetTrack = newTrack
+      }
+
+      try targetTrack.insertTimeRange(
+        CMTimeRange(start: .zero, duration: soundDuration),
+        of: track,
+        at: startTime
+      )
+    }
+
+    return mixParameters
+  }
+
+  public func exportToClipboard(_ request: ExportRequest) async throws {
+    try FileManager.default.createDirectory(at: request.temporaryDirectory, withIntermediateDirectories: true)
+    let tempURL = request.temporaryDirectory.appendingPathComponent("ssc_clipboard_\(UUID().uuidString).mp4")
+    var clipboardRequest = request
+    clipboardRequest.outputURL = tempURL
+    try await export(clipboardRequest)
+
+    #if canImport(AppKit)
+    let pasteboard = NSPasteboard.general
+    pasteboard.clearContents()
+    let videoData = try Data(contentsOf: tempURL)
+    pasteboard.setData(videoData, forType: .init("public.mpeg-4"))
+    #else
+    throw ExportError.clipboardUnavailable
+    #endif
+
+    try? FileManager.default.removeItem(at: tempURL)
   }
 
   private func makeVideoSettings(preset: ExportPreset) -> [String: Any] {
@@ -292,6 +441,14 @@ public final class ExportEngine {
       AVVideoHeightKey: preset.height,
       AVVideoCompressionPropertiesKey: compression
     ]
+  }
+
+  private func makeEngineVersionMetadata(engineVersion: String) -> [AVMetadataItem] {
+    let metadataItem = AVMutableMetadataItem()
+    metadataItem.keySpace = .common
+    metadataItem.key = AVMetadataKey.commonKeySoftware as (NSCopying & NSObjectProtocol)
+    metadataItem.value = "SmoothScreenCap Engine \(engineVersion)" as (NSCopying & NSObjectProtocol)
+    return [metadataItem]
   }
 
   private func waitUntilReady(_ input: AVAssetWriterInput) {
