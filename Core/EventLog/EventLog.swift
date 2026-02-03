@@ -1,10 +1,52 @@
 import Foundation
 
+public enum CursorType: String, Codable, CaseIterable, Sendable {
+    case arrow
+    case iBeam
+    case pointingHand
+    case crosshair
+    case closedHand
+    case openHand
+    case resizeLeft
+    case resizeRight
+    case resizeLeftRight
+    case resizeUp
+    case resizeDown
+    case resizeUpDown
+    case disappearingItem
+    case operationNotAllowed
+    case dragLink
+    case dragCopy
+    case contextualMenu
+
+    public var hotspotNormalized: (x: Double, y: Double) {
+        switch self {
+        case .arrow:
+            return (0.15, 0.05)
+        case .iBeam, .crosshair, .closedHand, .openHand:
+            return (0.5, 0.5)
+        case .pointingHand:
+            return (0.3, 0.05)
+        case .resizeLeft, .resizeRight, .resizeLeftRight:
+            return (0.5, 0.5)
+        case .resizeUp, .resizeDown, .resizeUpDown:
+            return (0.5, 0.5)
+        case .disappearingItem, .operationNotAllowed:
+            return (0.5, 0.5)
+        case .dragLink, .dragCopy:
+            return (0.15, 0.05)
+        case .contextualMenu:
+            return (0.15, 0.05)
+        }
+    }
+}
+
 public struct EventLogEntry: Codable, Equatable {
   public enum EventType: String, Codable {
     case mouse
     case scroll
     case key
+    case cursorChange
   }
 
   public struct Point: Codable, Equatable {
@@ -78,11 +120,20 @@ public struct EventLogEntry: Codable, Equatable {
     }
   }
 
+  public struct CursorChangeEvent: Codable, Equatable {
+    public var cursorType: CursorType
+
+    public init(cursorType: CursorType) {
+      self.cursorType = cursorType
+    }
+  }
+
   public var time: Double
   public var type: EventType
   public var mouse: MouseEvent?
   public var scroll: ScrollEvent?
   public var key: KeyEvent?
+  public var cursorChange: CursorChangeEvent?
 
   public init(time: Double, mouse: MouseEvent) {
     self.time = time
@@ -90,6 +141,7 @@ public struct EventLogEntry: Codable, Equatable {
     self.mouse = mouse
     self.scroll = nil
     self.key = nil
+    self.cursorChange = nil
   }
 
   public init(time: Double, scroll: ScrollEvent) {
@@ -98,6 +150,7 @@ public struct EventLogEntry: Codable, Equatable {
     self.mouse = nil
     self.scroll = scroll
     self.key = nil
+    self.cursorChange = nil
   }
 
   public init(time: Double, key: KeyEvent) {
@@ -106,6 +159,16 @@ public struct EventLogEntry: Codable, Equatable {
     self.mouse = nil
     self.scroll = nil
     self.key = key
+    self.cursorChange = nil
+  }
+
+  public init(time: Double, cursorChange: CursorChangeEvent) {
+    self.time = time
+    self.type = .cursorChange
+    self.mouse = nil
+    self.scroll = nil
+    self.key = nil
+    self.cursorChange = cursorChange
   }
 }
 

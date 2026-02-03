@@ -75,7 +75,7 @@ let package = Package(
     ),
     .target(
       name: "Rendering",
-      dependencies: ["ProjectModel"],
+      dependencies: ["ProjectModel", "EventLog"],
       path: "Rendering",
       resources: [.process("Shaders")]
     ),

@@ -1,5 +1,6 @@
 import CoreGraphics
 import CoreVideo
+import EventLog
 import Metal
 import ProjectModel
 
@@ -203,19 +204,22 @@ public struct CursorLayer {
   public var position: CGPoint
   public var hotspot: CGPoint
   public var opacity: Float
+  public var cursorType: CursorType
 
   public init(
     texture: MTLTexture,
     size: CGSize,
     position: CGPoint,
     hotspot: CGPoint = .zero,
-    opacity: Float = 1.0
+    opacity: Float = 1.0,
+    cursorType: CursorType = .arrow
   ) {
     self.texture = texture
     self.size = size
     self.position = position
     self.hotspot = hotspot
     self.opacity = opacity
+    self.cursorType = cursorType
   }
 }
 

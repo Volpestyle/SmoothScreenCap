@@ -2,6 +2,7 @@ import SwiftUI
 import MetalKit
 import Rendering
 import ProjectModel
+import EventLog
 
 /// SwiftUI wrapper for Metal-rendered preview
 struct MetalPreviewView: NSViewRepresentable {
@@ -65,7 +66,7 @@ final class PreviewRenderer: ObservableObject {
 
     private var frameReader: VideoFrameReader?
     private var cursorInterpolator: CursorInterpolator?
-    private var cursorTexture: MTLTexture?
+    private var cursorTextures: [CursorType: MTLTexture] = [:]
 
     init() throws {
         self.metalRenderer = try MetalRenderer()
@@ -82,8 +83,8 @@ final class PreviewRenderer: ObservableObject {
                 cursorInterpolator = try? CursorInterpolator(url: eventsURL)
             }
 
-            // Create cursor texture (simple circle for now)
-            cursorTexture = try CursorTextureFactory.makeCursorTexture(device: metalRenderer.device)
+            // Load all cursor textures
+            cursorTextures = CursorTextureFactory.loadAllCursorTextures(device: metalRenderer.device)
         } catch {
             self.error = error
         }
@@ -125,7 +126,7 @@ final class PreviewRenderer: ObservableObject {
             var clickHighlight: ClickHighlight?
 
             if let interpolator = cursorInterpolator,
-               let cursorTexture = cursorTexture {
+               !cursorTextures.isEmpty {
                 let state = interpolator.cursorState(
                     at: sourceTime,
                     cursorSettings: settings,
@@ -144,23 +145,39 @@ final class PreviewRenderer: ObservableObject {
                 let screenPosition = CGPoint(x: screenX, y: screenY)
 
                 if state.isVisible {
-                    // Cursor size with user scale setting
-                    let baseCursorSize: CGFloat = 24
-                    let userScale = CGFloat(settings.scale)
-                    let cursorSize = CGSize(width: baseCursorSize * userScale, height: baseCursorSize * userScale)
-                    let clickScale: CGFloat = state.isClicking ? 1.3 : 1.0
-                    let scaledSize = CGSize(
-                        width: cursorSize.width * clickScale,
-                        height: cursorSize.height * clickScale
-                    )
+                    // Get cursor type-specific texture
+                    let cursorType = state.cursorType
+                    if let cursorTexture = cursorTextures[cursorType] {
+                        // Get actual cursor image size from texture and scale appropriately
+                        let textureWidth = CGFloat(cursorTexture.width)
+                        let textureHeight = CGFloat(cursorTexture.height)
+                        let userScale = CGFloat(settings.scale)
+                        let cursorSize = CGSize(
+                            width: textureWidth * userScale,
+                            height: textureHeight * userScale
+                        )
+                        let clickScale: CGFloat = state.isClicking ? 1.3 : 1.0
+                        let scaledSize = CGSize(
+                            width: cursorSize.width * clickScale,
+                            height: cursorSize.height * clickScale
+                        )
 
-                    cursorLayer = CursorLayer(
-                        texture: cursorTexture,
-                        size: scaledSize,
-                        position: screenPosition,
-                        hotspot: CGPoint(x: scaledSize.width / 2, y: scaledSize.height / 2),
-                        opacity: Float(state.opacity)
-                    )
+                        // Get the actual hotspot from NSCursor and scale it
+                        let rawHotspot = CursorTextureFactory.hotspot(for: cursorType)
+                        let hotspot = CGPoint(
+                            x: rawHotspot.x * userScale * clickScale,
+                            y: rawHotspot.y * userScale * clickScale
+                        )
+
+                        cursorLayer = CursorLayer(
+                            texture: cursorTexture,
+                            size: scaledSize,
+                            position: screenPosition,
+                            hotspot: hotspot,
+                            opacity: Float(state.opacity),
+                            cursorType: cursorType
+                        )
+                    }
                 }
 
                 // Build click highlight if enabled and there's an active click

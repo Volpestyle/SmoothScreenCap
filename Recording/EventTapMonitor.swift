@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Darwin
 import EventLog
@@ -13,6 +14,7 @@ final class EventTapMonitor {
   private var thread: Thread?
   private var runLoop: CFRunLoop?
   private var isRunning = false
+  private var lastCursorType: CursorType?
 
   init(writer: EventLogWriter, captureRect: CGRect?, startTime: UInt64) {
     self.writer = writer
@@ -95,6 +97,7 @@ final class EventTapMonitor {
 
     switch type {
     case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
+      checkAndLogCursorChange(time: time)
       appendMouse(
         time: time,
         action: .move,
@@ -190,6 +193,43 @@ final class EventTapMonitor {
     if flags.contains(.maskAlphaShift) { modifiers.append("capsLock") }
     if flags.contains(.maskSecondaryFn) { modifiers.append("fn") }
     return modifiers
+  }
+
+  private func checkAndLogCursorChange(time: Double) {
+    DispatchQueue.main.async { [weak self] in
+      guard let self else { return }
+      let cursorType = self.detectCurrentCursorType()
+      if cursorType != self.lastCursorType {
+        self.lastCursorType = cursorType
+        let entry = EventLogEntry(
+          time: time,
+          cursorChange: .init(cursorType: cursorType)
+        )
+        try? self.writer.append(entry)
+      }
+    }
+  }
+
+  private func detectCurrentCursorType() -> CursorType {
+    let cursor = NSCursor.current
+    if cursor == NSCursor.arrow { return .arrow }
+    if cursor == NSCursor.iBeam { return .iBeam }
+    if cursor == NSCursor.pointingHand { return .pointingHand }
+    if cursor == NSCursor.crosshair { return .crosshair }
+    if cursor == NSCursor.closedHand { return .closedHand }
+    if cursor == NSCursor.openHand { return .openHand }
+    if cursor == NSCursor.resizeLeft { return .resizeLeft }
+    if cursor == NSCursor.resizeRight { return .resizeRight }
+    if cursor == NSCursor.resizeLeftRight { return .resizeLeftRight }
+    if cursor == NSCursor.resizeUp { return .resizeUp }
+    if cursor == NSCursor.resizeDown { return .resizeDown }
+    if cursor == NSCursor.resizeUpDown { return .resizeUpDown }
+    if cursor == NSCursor.disappearingItem { return .disappearingItem }
+    if cursor == NSCursor.operationNotAllowed { return .operationNotAllowed }
+    if cursor == NSCursor.dragLink { return .dragLink }
+    if cursor == NSCursor.dragCopy { return .dragCopy }
+    if cursor == NSCursor.contextualMenu { return .contextualMenu }
+    return .arrow
   }
 
   enum EventTapError: Error {

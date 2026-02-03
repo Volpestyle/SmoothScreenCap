@@ -11,6 +11,7 @@ final class CursorInterpolator {
         var isClicking: Bool
         var clickProgress: Double  // 0-1, for click animation
         var opacity: Double
+        var cursorType: CursorType
 
         var isVisible: Bool {
             opacity > 0.001
@@ -20,7 +21,8 @@ final class CursorInterpolator {
             position: .zero,
             isClicking: false,
             clickProgress: 0,
-            opacity: 0
+            opacity: 0,
+            cursorType: .arrow
         )
     }
 
@@ -31,6 +33,7 @@ final class CursorInterpolator {
 
     private var mouseEntries: [(time: Double, entry: EventLogEntry.MouseEvent)] = []
     private var leftClickTimes: [Double] = []
+    private var cursorChanges: [(time: Double, type: CursorType)] = []
 
     private var filter = OneEuroFilter()
     private var filterSettings = OneEuroFilterSettings()
@@ -48,6 +51,12 @@ final class CursorInterpolator {
         self.leftClickTimes = mouseEntries.compactMap { entry in
             guard entry.entry.action == .down, entry.entry.button == .left else { return nil }
             return entry.time
+        }
+
+        // Pre-filter cursor change events
+        self.cursorChanges = entries.compactMap { entry in
+            guard let cursorChange = entry.cursorChange else { return nil }
+            return (time: entry.time, type: cursorChange.cursorType)
         }
     }
 
@@ -121,11 +130,14 @@ final class CursorInterpolator {
             }
         }
 
+        let cursorType = cursorTypeAt(time: time)
+
         return CursorState(
             position: smoothedPosition,
             isClicking: isClicking,
             clickProgress: clickProgress,
-            opacity: opacity
+            opacity: opacity,
+            cursorType: cursorType
         )
     }
 
@@ -288,5 +300,26 @@ final class CursorInterpolator {
             }
         }
         return active
+    }
+
+    private func cursorTypeAt(time: Double) -> CursorType {
+        guard !cursorChanges.isEmpty else { return .arrow }
+        if time < cursorChanges[0].time {
+            return .arrow
+        }
+        // Binary search to find the last cursor change at or before time
+        var low = 0
+        var high = cursorChanges.count - 1
+        var result = 0
+        while low <= high {
+            let mid = (low + high) / 2
+            if cursorChanges[mid].time <= time {
+                result = mid
+                low = mid + 1
+            } else {
+                high = mid - 1
+            }
+        }
+        return cursorChanges[result].type
     }
 }
