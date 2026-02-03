@@ -105,11 +105,14 @@ public final class MetalRenderer {
     if let shaderLibrary {
       library = shaderLibrary
     } else {
-      do {
-        library = try device.makeDefaultLibrary(bundle: .module)
-      } catch {
+      guard let shaderURL = Bundle.module.url(
+        forResource: "RendererShaders",
+        withExtension: "metal"
+      ) else {
         throw RenderingError.shaderLibraryNotFound
       }
+      let source = try String(contentsOf: shaderURL)
+      library = try device.makeLibrary(source: source, options: nil)
     }
     guard
       let vertexFunction = library.makeFunction(name: "vertexQuad"),

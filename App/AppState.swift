@@ -27,7 +27,11 @@ final class AppState: ObservableObject {
     @Published var selectedSidebarTab: EditorSidebarTab = .background
 
     // MARK: - Project Management
-    @Published var currentProject: ProjectModel?
+    @Published var currentProject: ProjectModel? {
+        didSet {
+            registerUndoIfNeeded(from: oldValue, to: currentProject)
+        }
+    }
     @Published var currentProjectURL: URL?
     @Published var recentProjectURLs: [URL] = []
     @Published var projectMetadata: [URL: ProjectMetadata] = [:]
@@ -85,6 +89,16 @@ final class AppState: ObservableObject {
     private var recordingTimer: Timer?
     private var clickSoundPlayer: ClickSoundPlayer?
     private var lastPreviewSourceTime: TimeInterval?
+    private var playbackTask: Task<Void, Never>?
+    private var playbackLastTick: Date?
+
+    // MARK: - Undo / Redo
+    @Published private(set) var canUndo = false
+    @Published private(set) var canRedo = false
+    private var undoStack: [ProjectModel] = []
+    private var redoStack: [ProjectModel] = []
+    private var suppressUndoRegistration = 0
+    private var isPerformingUndoRedo = false
 
     // MARK: - Source Preview
     let sourcePreviewManager = SourcePreviewManager()
@@ -111,6 +125,12 @@ final class AppState: ObservableObject {
     // MARK: - Playback State
     @Published var isPlaying = false
     @Published var currentTime: TimeInterval = 0 // output time
+
+    private var playbackFrameInterval: TimeInterval {
+        let fps = currentProject?.assets.screen.frameRate ?? 30
+        let clampedFps = min(max(fps, 10), 60)
+        return 1.0 / clampedFps
+    }
 
     var currentSourceTime: TimeInterval? {
         timeMapper?.sourceTime(for: currentTime)
@@ -166,7 +186,10 @@ final class AppState: ObservableObject {
     func openProject(at url: URL) {
         do {
             let project = try projectManager.load(from: url)
-            currentProject = project
+            withUndoSuppressed {
+                currentProject = project
+            }
+            resetUndoHistory()
             currentProjectURL = url
             rebuildTimeMapper()
             warnIfEngineVersionMismatch(project)
@@ -286,10 +309,119 @@ final class AppState: ObservableObject {
     }
 
     func togglePlayback() {
-        isPlaying.toggle()
         if isPlaying {
-            lastPreviewSourceTime = currentSourceTime
+            stopPlayback()
+        } else {
+            startPlayback()
         }
+    }
+
+    private func startPlayback() {
+        guard outputDuration > 0 else { return }
+        if currentTime >= outputDuration {
+            currentTime = 0
+        }
+        isPlaying = true
+        lastPreviewSourceTime = currentSourceTime
+        playbackLastTick = Date()
+        playbackTask?.cancel()
+        playbackTask = Task { @MainActor [weak self] in
+            await self?.runPlaybackLoop()
+        }
+    }
+
+    private func stopPlayback() {
+        isPlaying = false
+        playbackTask?.cancel()
+        playbackTask = nil
+    }
+
+    private func runPlaybackLoop() async {
+        var lastTick = playbackLastTick ?? Date()
+        while isPlaying && !Task.isCancelled {
+            let interval = playbackFrameInterval
+            if interval > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+            }
+            let now = Date()
+            let delta = now.timeIntervalSince(lastTick)
+            lastTick = now
+
+            let nextTime = currentTime + delta
+            if nextTime >= outputDuration {
+                currentTime = outputDuration
+                isPlaying = false
+            } else {
+                currentTime = nextTime
+            }
+
+            await updatePreviewFrame()
+        }
+        playbackTask = nil
+    }
+
+    // MARK: - Undo / Redo
+
+    func undo() {
+        guard let current = currentProject, let previous = undoStack.popLast() else { return }
+        redoStack.append(current)
+        applyProjectSnapshot(previous)
+        updateUndoAvailability()
+    }
+
+    func redo() {
+        guard let current = currentProject, let next = redoStack.popLast() else { return }
+        undoStack.append(current)
+        applyProjectSnapshot(next)
+        updateUndoAvailability()
+    }
+
+    func resetUndoHistory() {
+        undoStack.removeAll()
+        redoStack.removeAll()
+        updateUndoAvailability()
+    }
+
+    private func applyProjectSnapshot(_ project: ProjectModel) {
+        if isPlaying {
+            stopPlayback()
+        }
+        isPerformingUndoRedo = true
+        withUndoSuppressed {
+            currentProject = project
+        }
+        isPerformingUndoRedo = false
+
+        rebuildTimeMapper()
+        syncClickSoundPlayer(with: project.edit.cursorSettings ?? CursorSettings())
+        if outputDuration > 0 {
+            currentTime = min(max(0, currentTime), outputDuration)
+        } else {
+            currentTime = 0
+        }
+        Task {
+            await updatePreviewFrame()
+        }
+        saveCurrentProject()
+    }
+
+    private func registerUndoIfNeeded(from oldValue: ProjectModel?, to newValue: ProjectModel?) {
+        guard suppressUndoRegistration == 0, !isPerformingUndoRedo else { return }
+        guard let oldValue, let newValue, oldValue != newValue else { return }
+        undoStack.append(oldValue)
+        redoStack.removeAll()
+        updateUndoAvailability()
+    }
+
+    private func updateUndoAvailability() {
+        canUndo = !undoStack.isEmpty
+        canRedo = !redoStack.isEmpty
+    }
+
+    private func withUndoSuppressed(_ action: () -> Void) {
+        suppressUndoRegistration += 1
+        defer { suppressUndoRegistration = max(0, suppressUndoRegistration - 1) }
+        action()
     }
 
     private func syncClickSoundPlayer(with settings: CursorSettings) {
@@ -639,11 +771,18 @@ final class AppState: ObservableObject {
                         createdAt: project.createdAt,
                         thumbnailColor: .blue
                     )
-                    self.currentProject = project
+                    self.withUndoSuppressed {
+                        self.currentProject = project
+                    }
+                    self.resetUndoHistory()
                     self.currentProjectURL = projectURL
                     self.rebuildTimeMapper()
                     self.currentSection = .editor
+                    self.currentTime = 0
+                    self.syncClickSoundPlayer(with: project.edit.cursorSettings ?? CursorSettings())
                 }
+
+                await self.loadPreviewRenderer(projectURL: projectURL, project: project)
             } catch {
                 await MainActor.run {
                     print("Failed to package project: \(error)")
@@ -728,7 +867,10 @@ final class AppState: ObservableObject {
 
         let eventsURL = projectURL.appendingPathComponent(project.assets.events.path)
         guard let interpolator = try? CursorInterpolator(url: eventsURL) else { return }
-        guard let cursorTexture = try? CursorTextureFactory.makeCursorTexture(device: renderer.device) else { return }
+
+        // Load all cursor textures upfront
+        let cursorTextures = CursorTextureFactory.loadAllCursorTextures(device: renderer.device)
+        guard !cursorTextures.isEmpty else { return }
 
         let settings = project.edit.cursorSettings ?? CursorSettings()
         let overrides = project.edit.cursorOverrides
@@ -755,24 +897,43 @@ final class AppState: ObservableObject {
         renderer.cursorProvider = { time, context in
             let state = cache.state(at: time.sourceTime)
             guard state.isVisible else { return nil }
+
+            // Get cursor type-specific texture
+            let cursorType = state.cursorType
+            guard let cursorTexture = cursorTextures[cursorType] else {
+                return nil
+            }
+
             let position = screenPosition(state.position, context.outputSize)
-            let baseCursorSize: CGFloat = 24
+
+            // Get actual cursor image size from texture and scale appropriately
+            let textureWidth = CGFloat(cursorTexture.width)
+            let textureHeight = CGFloat(cursorTexture.height)
             let userScale = CGFloat(settings.scale)
             let cursorSize = CGSize(
-                width: baseCursorSize * userScale,
-                height: baseCursorSize * userScale
+                width: textureWidth * userScale,
+                height: textureHeight * userScale
             )
             let clickScale: CGFloat = state.isClicking ? 1.3 : 1.0
             let scaledSize = CGSize(
                 width: cursorSize.width * clickScale,
                 height: cursorSize.height * clickScale
             )
+
+            // Get the actual hotspot from NSCursor and scale it
+            let rawHotspot = CursorTextureFactory.hotspot(for: cursorType)
+            let hotspot = CGPoint(
+                x: rawHotspot.x * userScale * clickScale,
+                y: rawHotspot.y * userScale * clickScale
+            )
+
             return CursorLayer(
                 texture: cursorTexture,
                 size: scaledSize,
                 position: position,
-                hotspot: CGPoint(x: scaledSize.width / 2, y: scaledSize.height / 2),
-                opacity: Float(state.opacity)
+                hotspot: hotspot,
+                opacity: Float(state.opacity),
+                cursorType: cursorType
             )
         }
 

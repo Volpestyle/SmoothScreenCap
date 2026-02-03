@@ -32,7 +32,8 @@ final class VideoFrameReader {
 
     /// Get a CGImage at the specified time
     func frame(at time: TimeInterval) async throws -> CGImage {
-        let cmTime = CMTime(seconds: time, preferredTimescale: 600)
+        let clampedTime = clampTime(time)
+        let cmTime = CMTime(seconds: clampedTime, preferredTimescale: 600)
         let (image, _) = try await generator.image(at: cmTime)
         return image
     }
@@ -41,6 +42,13 @@ final class VideoFrameReader {
     func pixelBuffer(at time: TimeInterval) async throws -> CVPixelBuffer {
         let image = try await frame(at: time)
         return try createPixelBuffer(from: image)
+    }
+
+    private func clampTime(_ time: TimeInterval) -> TimeInterval {
+        guard duration > 0 else { return time }
+        let epsilon = max(0.001, min(1.0 / 60.0, duration))
+        let maxTime = max(0, duration - epsilon)
+        return min(max(time, 0), maxTime)
     }
 
     private func createPixelBuffer(from cgImage: CGImage) throws -> CVPixelBuffer {
